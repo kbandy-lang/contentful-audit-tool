@@ -1,0 +1,14 @@
+# Create a folder and initialize git
+mkdir ~/Desktop/contentful-audit-tool
+cd ~/Desktop/contentful-audit-tool
+
+# Copy your HTML file in, renamed to index.html
+cp ~/Desktop/contentful-audit-tool.html ./index.html
+
+# Initialize and push
+git init
+git add index.html
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/kbandy-lang/contentful-audit-tool.git
+git push -u origin main

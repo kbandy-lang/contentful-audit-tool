@@ -622,8 +622,9 @@
       background: white;
       border-radius: var(--radius);
       padding: 16px;
-      border: 1px solid var(--border);
+      border: 2px solid transparent;
       box-shadow: var(--shadow);
+      transition: box-shadow .15s, transform .1s, border-color .15s;
     }
 
     .summary-card-value { font-size: 28px; font-weight: 800; line-height: 1; }
@@ -645,6 +646,39 @@
     .issue-entry-row:hover { background: #f8fafc; }
     .issue-entry-row-title { font-weight: 600; font-size: 13px; }
     .issue-entry-row-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+    /* ─── Column filter dropdown ─── */
+    .col-filter-btn {
+      background: none; border: none; cursor: pointer; padding: 2px 5px;
+      border-radius: 4px; font-size: 11px; color: var(--text-muted);
+      transition: background .1s, color .1s; line-height: 1; vertical-align: middle;
+    }
+    .col-filter-btn:hover { background: rgba(0,112,192,.12); color: var(--primary); }
+    .col-filter-btn.active { background: rgba(0,112,192,.15); color: var(--primary); font-weight: 700; }
+    #colFilterPanel {
+      position: fixed; z-index: 9999;
+      background: white; border: 1px solid var(--border); border-radius: 10px;
+      box-shadow: 0 10px 32px rgba(0,0,0,.18); min-width: 220px; max-width: 300px;
+      padding: 8px 0; display: none;
+    }
+    #colFilterPanel.open { display: block; }
+    .col-filter-search {
+      width: 100%; padding: 8px 12px; border: none; border-bottom: 1px solid var(--border);
+      font-size: 12px; outline: none; background: #f8fafc; box-sizing: border-box;
+    }
+    .col-filter-option {
+      padding: 8px 14px; font-size: 12px; cursor: pointer;
+      overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px;
+    }
+    .col-filter-option:hover { background: var(--bg); }
+    .col-filter-option.selected { background: #eff6ff; color: var(--primary); font-weight: 700; }
+    .col-filter-option-count { margin-left: auto; font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+    .col-filter-list { max-height: 260px; overflow-y: auto; }
+    .col-filter-clear {
+      padding: 7px 14px; font-size: 11px; color: var(--error); cursor: pointer;
+      border-top: 1px solid var(--border); margin-top: 4px; font-weight: 600;
+    }
+    .col-filter-clear:hover { background: #fef2f2; }
 
     /* ─── Loading / Empty ─── */
     .loading-state, .empty-state {
@@ -1545,13 +1579,25 @@
     </select>
     <select class="filter-select" id="auditFilter" onchange="filterEntries()">
       <option value="all">All Issues</option>
-      <option value="error">Errors only</option>
-      <option value="warning">Warnings only</option>
-      <option value="ok">No issues</option>
+      <optgroup label="── Critical ──">
+        <option value="incomplete">Incomplete</option>
+        <option value="malformed">Malformed</option>
+      </optgroup>
+      <optgroup label="── Needs Review ──">
+        <option value="outdated">Outdated</option>
+        <option value="misclassified">Misclassified</option>
+      </optgroup>
+      <optgroup label="── Other ──">
+        <option value="convention">Convention</option>
+        <option value="ok">No issues</option>
+      </optgroup>
     </select>
     <button class="btn" onclick="openLaunchPrep()" style="background:#7c3aed;color:white;border-color:#7c3aed">🚀 Launch Prep</button>
     <button class="btn btn-primary" onclick="exportAudit()">↓ Export</button>
   </div>
+
+  <!-- Active column filter chips -->
+  <div id="activeColFilters" style="display:none;padding:4px 14px;background:#eff6ff;border-bottom:1px solid #bfdbfe;display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11px"></div>
 
   <!-- Audience Filter Bar -->
   <div class="audience-bar">
@@ -1596,6 +1642,9 @@
     </div>
   </div>
 </main>
+
+<!-- Floating column filter panel (fixed position, outside table) -->
+<div id="colFilterPanel"></div>
 
 <!-- Detail Panel -->
 <div class="detail-panel" id="detailPanel">
@@ -1796,7 +1845,7 @@ let contentTypes = [];
 let allEntries = [];       // published entries from CDA (sparse — display field only)
 let previewEntries = {};   // map of id -> full CPA entry (draft)
 let publishedEntries = {}; // map of id -> full CDA entry (all fields)
-let auditResults = {};     // map of id -> {errors:[], warnings:[], info:[]}
+let auditResults = {};     // map of id -> {outdated:[], incomplete:[], malformed:[], misclassified:[], convention:[]}
 let locales = [];
 let spaceTags = [];
 let activeAudienceFilter = 'all';
@@ -1811,6 +1860,8 @@ let detailDraft = null;
 let detailContentType = null;
 let aiAssistEnabled = {};    // map of entryId → true | false | null (null = not an app article)
 let hexMetrics = {};         // map of article slug → {views, escalations, escalation_rate, resolve_score, ...}
+let auditDashFilter = null;  // null = show cards, 'errors'|'warnings'|'ok'|'incomplete'|'malformed'|'outdated'|'misclassified'|'convention' = drilldown
+let columnFilters = { contentType: '', audit: '', aiAssist: '' };  // column-level filters for the entry table
 
 function normalizeEscalRate(rate, views) {
   if (rate == null || isNaN(rate)) return null;
@@ -2175,19 +2226,17 @@ function fastAuditAll() {
   const now = Date.now();
   for (const entry of allEntries) {
     if (auditResults[entry.sys.id]) continue; // don't overwrite a full audit
-    const issues = { errors: [], warnings: [], info: [] };
+    const issues = { outdated: [], incomplete: [], malformed: [], misclassified: [], convention: [] };
     const locale = locales.length ? locales[0].code : 'en-US';
     const ct = contentTypes.find(c => c.sys.id === entry.sys.contentType.sys.id);
     const ef = entry.fields || {};
 
-    // Stale content — sys.updatedAt is in the sparse data
+    // Staleness — sys.updatedAt is available in sparse data
     const daysSince = (now - new Date(entry.sys.updatedAt).getTime()) / 86400000;
     if (daysSince > staleDays) {
-      issues.warnings.push({
-        category: 'stale',
-        title: `Stale content (${Math.floor(daysSince)} days)`,
-        desc: `Last updated ${formatDate(entry.sys.updatedAt)}. Threshold: ${staleDays} days.`
-      });
+      issues.outdated.push({ category: 'stale', subtype: 'stale', title: `Stale (${Math.floor(daysSince)} days)`, desc: `Last updated ${formatDate(entry.sys.updatedAt)}. Needs review.` });
+    } else if (daysSince > 60) {
+      issues.outdated.push({ category: 'aging', subtype: 'aging', title: `Aging (${Math.floor(daysSince)} days)`, desc: `Last updated ${formatDate(entry.sys.updatedAt)}. FYI — approaching staleness threshold.` });
     }
 
     // Naming convention — display field is in the sparse data
@@ -2197,13 +2246,13 @@ function fastAuditAll() {
       const isHapApp = ctName.includes('hap ng') || ctName.includes('hap content');
       const isHapWeb = ctName.includes('hap web') || ctName.includes('web content');
       if (isHapApp && entryName && !entryName.startsWith('pax/') && !entryName.startsWith('driver/') && !entryName.startsWith('compliance/')) {
-        issues.errors.push({ category: 'naming', title: 'Name must start with pax/ or driver/', desc: `Current name: "${entryName}"` });
+        issues.malformed.push({ category: 'naming', title: 'Name must start with pax/ or driver/', desc: `Current name: "${entryName}"` });
       }
       if (isHapWeb && entryName && !entryName.startsWith('web/')) {
-        issues.errors.push({ category: 'naming', title: 'Web article name must start with web/', desc: `Current name: "${entryName}"` });
+        issues.malformed.push({ category: 'naming', title: 'Web article name must start with web/', desc: `Current name: "${entryName}"` });
       }
       if (entryName.startsWith('compliance/') && daysSince > 365) {
-        issues.errors.push({ category: 'lyft', title: `Compliance article overdue for review (${Math.floor(daysSince/30)} months old)`, desc: 'compliance/ articles must be reviewed and updated at least annually.' });
+        issues.outdated.push({ category: 'expired', subtype: 'expired', title: `Expired — compliance review overdue (${Math.floor(daysSince/30)} months)`, desc: 'compliance/ articles must be reviewed and updated at least annually.' });
       }
     }
 
@@ -2276,47 +2325,36 @@ async function loadPublishedEntry(entryId) {
 // AUDIT ENGINE
 // ──────────────────────────────────────────────────────────────────────
 async function auditEntry(entry, publishedEntry, previewEntry, ctDef) {
-  const issues = { errors: [], warnings: [], info: [] };
+  const issues = { outdated: [], incomplete: [], malformed: [], misclassified: [], convention: [] };
   const fields = ctDef ? ctDef.fields : [];
   const locale = locales.length ? locales[0].code : 'en-US';
   const entryFields = previewEntry ? previewEntry.fields : (entry.fields || {});
+  const entryContentType = entry.sys.contentType ? entry.sys.contentType.sys.id : '';
 
-  // 1. Missing required fields
+  // 1. Missing required fields → Incomplete
   for (const field of fields) {
     if (!field.required) continue;
     const locVal = getFieldVal(entryFields[field.id], locale);
     if (locVal === undefined || locVal === null || locVal === '' || (Array.isArray(locVal) && locVal.length === 0)) {
-      issues.errors.push({
-        category: 'required',
-        title: `Required field is empty: "${field.name}"`,
-        desc: `The field "${field.id}" is marked required but has no value.`
-      });
+      issues.incomplete.push({ category: 'required', title: `Missing required field: "${field.name}"`, desc: `"${field.id}" is marked required but has no value.` });
     }
   }
 
-  // 2. Missing localization — check all localized fields across all locales
+  // 2. Missing localization → Incomplete (required) or Convention (optional)
   if (locales.length > 1) {
     for (const field of fields) {
       if (!field.localized) continue;
       const val = entryFields[field.id] || {};
-      const missingLocales = locales.filter(l => {
-        const v = val[l.code];
-        return v === undefined || v === null || v === '';
-      }).map(l => l.name || l.code);
+      const missingLocales = locales.filter(l => { const v = val[l.code]; return v === undefined || v === null || v === ''; }).map(l => l.name || l.code);
       if (missingLocales.length > 0) {
-        const severity = field.required ? 'errors' : 'warnings';
-        issues[severity].push({
-          category: 'localization',
-          title: `Missing translations: "${field.name}"`,
-          desc: `Missing in: ${missingLocales.join(', ')}`
-        });
+        const bucket = field.required ? 'incomplete' : 'convention';
+        issues[bucket].push({ category: 'localization', title: `Missing translations: "${field.name}"`, desc: `Missing in: ${missingLocales.join(', ')}` });
       }
     }
   }
 
-  // 3. SEO fields check
+  // 3. SEO fields → Malformed (too long) or Convention (empty)
   const seoFieldPatterns = ['seoTitle','metaTitle','seoDescription','metaDescription','ogTitle','ogDescription','twitterTitle','twitterDescription','canonicalUrl'];
-  const entryContentType = entry.sys.contentType ? entry.sys.contentType.sys.id : '';
   const hasSeoFields = fields.some(f => seoFieldPatterns.some(p => f.id.toLowerCase().includes(p.toLowerCase())));
   if (hasSeoFields) {
     for (const field of fields) {
@@ -2324,71 +2362,49 @@ async function auditEntry(entry, publishedEntry, previewEntry, ctDef) {
       if (!isSeo) continue;
       const locVal = getFieldVal(entryFields[field.id], locale);
       if (!locVal) {
-        issues.warnings.push({
-          category: 'seo',
-          title: `SEO field empty: "${field.name}"`,
-          desc: `Field "${field.id}" is used for SEO but has no value.`
-        });
+        issues.convention.push({ category: 'seo', title: `SEO field empty: "${field.name}"`, desc: `Field "${field.id}" is used for SEO but has no value.` });
       } else if (typeof locVal === 'string') {
-        if (field.id.toLowerCase().includes('title') && locVal.length > 60) {
-          issues.warnings.push({ category: 'seo', title: `SEO title too long: "${field.name}"`, desc: `${locVal.length} characters (recommended: ≤60)` });
-        }
-        if (field.id.toLowerCase().includes('description') && locVal.length > 160) {
-          issues.warnings.push({ category: 'seo', title: `Meta description too long: "${field.name}"`, desc: `${locVal.length} characters (recommended: ≤160)` });
-        }
+        if (field.id.toLowerCase().includes('title') && locVal.length > 60)
+          issues.malformed.push({ category: 'seo', title: `SEO title too long: "${field.name}"`, desc: `${locVal.length} characters (recommended: ≤60)` });
+        if (field.id.toLowerCase().includes('description') && locVal.length > 160)
+          issues.malformed.push({ category: 'seo', title: `Meta description too long: "${field.name}"`, desc: `${locVal.length} characters (recommended: ≤160)` });
       }
     }
   }
 
-  // 4. Broken/missing asset references
+  // 4. Asset references → Convention (informational)
   for (const field of fields) {
     const locVal = getFieldVal(entryFields[field.id], locale);
     if (!locVal) continue;
     const links = Array.isArray(locVal) ? locVal : [locVal];
     for (const link of links) {
       if (link && link.sys && link.sys.linkType === 'Asset') {
-        // We check if the asset is resolvable by trying to fetch it
-        // For now we flag as info since full resolution needs include data
-        issues.info.push({
-          category: 'assets',
-          title: `Asset reference in "${field.name}"`,
-          desc: `Asset ID: ${link.sys.id} — verify it exists and is published.`
-        });
+        issues.convention.push({ category: 'assets', title: `Asset reference in "${field.name}"`, desc: `Asset ID: ${link.sys.id} — verify it exists and is published.` });
       }
     }
   }
 
-  // 5. Stale content
+  // 5. Staleness → Outdated
   const staleDays = config.staleDays || 90;
   const updatedAt = new Date(entry.sys.updatedAt);
   const daysSinceUpdate = (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
   if (daysSinceUpdate > staleDays) {
-    issues.warnings.push({
-      category: 'stale',
-      title: `Stale content (${Math.floor(daysSinceUpdate)} days)`,
-      desc: `Last updated ${formatDate(entry.sys.updatedAt)}. Threshold: ${staleDays} days.`
-    });
+    issues.outdated.push({ category: 'stale', subtype: 'stale', title: `Stale (${Math.floor(daysSinceUpdate)} days)`, desc: `Last updated ${formatDate(entry.sys.updatedAt)}. Needs review.` });
+  } else if (daysSinceUpdate > 60) {
+    issues.outdated.push({ category: 'aging', subtype: 'aging', title: `Aging (${Math.floor(daysSinceUpdate)} days)`, desc: `Last updated ${formatDate(entry.sys.updatedAt)}. Approaching staleness threshold.` });
   }
 
-  // Check if draft exists with no published version (unpublished)
+  // Never published → Convention
   if (!publishedEntry && previewEntry) {
-    issues.warnings.push({
-      category: 'unpublished',
-      title: 'Entry has never been published',
-      desc: 'This entry exists as a draft but has no published version.'
-    });
+    issues.convention.push({ category: 'unpublished', title: 'Entry has never been published', desc: 'This entry exists as a draft but has no published version.' });
   }
 
-  // Draft changes exist (preview != published)
+  // Unpublished draft changes → Convention
   if (publishedEntry && previewEntry) {
     const pubUpdated = new Date(publishedEntry.sys.updatedAt);
     const preUpdated = new Date(previewEntry.sys.updatedAt);
     if (preUpdated > pubUpdated) {
-      issues.info.push({
-        category: 'draft',
-        title: 'Unpublished draft changes',
-        desc: `Draft is ${Math.floor((preUpdated - pubUpdated) / (1000*60*60*24))} day(s) newer than published version.`
-      });
+      issues.convention.push({ category: 'draft', title: 'Unpublished draft changes', desc: `Draft is ${Math.floor((preUpdated - pubUpdated) / (1000*60*60*24))} day(s) newer than published version.` });
     }
   }
 
@@ -2397,47 +2413,31 @@ async function auditEntry(entry, publishedEntry, previewEntry, ctDef) {
     if (rule.contentType && rule.contentType !== entryContentType) continue;
     const locVal = getFieldVal(entryFields[rule.field], locale);
     if (rule.rule === 'required') {
-      if (!locVal || (Array.isArray(locVal) && !locVal.length)) {
-        issues.errors.push({
-          category: 'custom',
-          title: `Custom rule: "${rule.field}" is required`,
-          desc: `Business rule requires this field to be populated.`
-        });
-      }
+      if (!locVal || (Array.isArray(locVal) && !locVal.length))
+        issues.incomplete.push({ category: 'custom', title: `Missing required field: "${rule.field}"`, desc: 'Business rule requires this field to be populated.' });
     } else if (rule.rule === 'maxLength' && typeof locVal === 'string') {
-      if (locVal.length > rule.value) {
-        issues.warnings.push({
-          category: 'custom',
-          title: `Custom rule: "${rule.field}" exceeds max length`,
-          desc: `${locVal.length} chars (max: ${rule.value})`
-        });
-      }
+      if (locVal.length > rule.value)
+        issues.malformed.push({ category: 'custom', title: `"${rule.field}" exceeds max length`, desc: `${locVal.length} chars (max: ${rule.value})` });
     }
   }
 
   // 7. LYFT-SPECIFIC CHECKS
-  const entryName = (typeof getFieldVal(entryFields['name'], locale) === 'string')
-    ? getFieldVal(entryFields['name'], locale)
-    : '';
+  const entryName = (typeof getFieldVal(entryFields['name'], locale) === 'string') ? getFieldVal(entryFields['name'], locale) : '';
 
-  // Naming convention: driver/, pax/, compliance/ → underscores only; web/ → hyphens only
+  // Naming separators → Malformed
   if (entryName) {
     const nameSuffix = entryName.split('/').slice(1).join('/');
-    if ((entryName.startsWith('driver/') || entryName.startsWith('pax/') || entryName.startsWith('compliance/')) && nameSuffix.includes('-')) {
-      issues.errors.push({ category: 'lyft', title: 'Naming: use underscores, not hyphens', desc: `"${entryName}" — driver/, pax/, compliance/ articles must use underscores between words (e.g. driver/my_article).` });
-    }
-    if (entryName.startsWith('web/') && nameSuffix.includes('_')) {
-      issues.errors.push({ category: 'lyft', title: 'Naming: use hyphens, not underscores', desc: `"${entryName}" — web/ articles must use hyphens between words (e.g. web/my-article).` });
-    }
+    if ((entryName.startsWith('driver/') || entryName.startsWith('pax/') || entryName.startsWith('compliance/')) && nameSuffix.includes('-'))
+      issues.malformed.push({ category: 'lyft', title: 'Naming: use underscores, not hyphens', desc: `"${entryName}" — driver/, pax/, compliance/ articles must use underscores (e.g. driver/my_article).` });
+    if (entryName.startsWith('web/') && nameSuffix.includes('_'))
+      issues.malformed.push({ category: 'lyft', title: 'Naming: use hyphens, not underscores', desc: `"${entryName}" — web/ articles must use hyphens (e.g. web/my-article).` });
   }
 
-  // Collapsible sections must end in _cs
-  if (entryContentType.toLowerCase().includes('collapsible') && entryName && !entryName.endsWith('_cs')) {
-    issues.errors.push({ category: 'lyft', title: 'Collapsible name must end in _cs', desc: `Name "${entryName}" is missing the required _cs suffix.` });
-  }
+  // Collapsible _cs suffix → Malformed
+  if (entryContentType.toLowerCase().includes('collapsible') && entryName && !entryName.endsWith('_cs'))
+    issues.malformed.push({ category: 'lyft', title: 'Collapsible name must end in _cs', desc: `Name "${entryName}" is missing the required _cs suffix.` });
 
-
-  // AI Assist Prompt Context required (app articles)
+  // AI Assist Prompt Context → Incomplete (missing) or Malformed (wrong format)
   if (entryName.startsWith('driver/') || entryName.startsWith('pax/')) {
     const aiField = fields.find(f =>
       f.id.toLowerCase().replace(/[^a-z]/g,'').includes('aiassistpromptcontext') ||
@@ -2446,79 +2446,71 @@ async function auditEntry(entry, publishedEntry, previewEntry, ctDef) {
     );
     if (aiField) {
       const v = getFieldVal(entryFields[aiField.id], locale);
-      if (!v) {
-        issues.errors.push({ category: 'lyft', title: 'Missing: AI Assist Prompt Context', desc: 'Required on all app articles. Format: "It looks like you need help with [topic]."' });
-      } else if (typeof v === 'string' && !v.toLowerCase().startsWith('it looks like')) {
-        issues.warnings.push({ category: 'lyft', title: 'AI Assist Prompt Context format', desc: `Should start with "It looks like you need help with..." — found: "${v.substring(0,60)}${v.length>60?'…':''}"` });
-      }
+      if (!v) issues.incomplete.push({ category: 'lyft', title: 'Missing: AI Assist Prompt Context', desc: 'Required on all app articles. Format: "It looks like you need help with [topic]."' });
+      else if (typeof v === 'string' && !v.toLowerCase().startsWith('it looks like'))
+        issues.malformed.push({ category: 'lyft', title: 'AI Assist Prompt Context format', desc: `Must start with "It looks like you need help with..." — found: "${v.substring(0,60)}${v.length>60?'…':''}"` });
     }
   }
 
-  // Translation context required (app articles)
+  // Translation context → Misclassified (missing)
   if (entryName.startsWith('driver/') || entryName.startsWith('pax/')) {
-    const transField = fields.find(f =>
-      f.id.toLowerCase().includes('translation') ||
-      (f.name || '').toLowerCase().includes('translation context')
-    );
+    const transField = fields.find(f => f.id.toLowerCase().includes('translation') || (f.name || '').toLowerCase().includes('translation context'));
     if (transField) {
       const v = getFieldVal(entryFields[transField.id], locale);
-      if (!v) {
-        issues.errors.push({ category: 'lyft', title: 'Missing: Translation context', desc: 'Required on all app articles. A brief description visible in Contentful search results.' });
-      }
+      if (!v) issues.misclassified.push({ category: 'lyft', title: 'Missing: Translation context', desc: 'Required on all app articles. A brief description visible in Contentful search results.' });
     }
   }
 
-  // web/ articles must have parent_entry_name for IA placement
+  // Rider-only tag missing on pax/ → Misclassified
+  if (entryName.startsWith('pax/')) {
+    const tags = (entry.metadata && entry.metadata.tags) || [];
+    const hasRiderTag = tags.some(t => t.sys && t.sys.id && t.sys.id.toLowerCase().includes('rider_only'));
+    if (!hasRiderTag) issues.misclassified.push({ category: 'lyft', title: 'Missing: ai_assist:audience:rider_only tag', desc: 'pax/ articles need the rider_only tag to surface correctly for riders in AI Assist.' });
+  }
+
+  // Parent entry name for web/ → Incomplete
   if (entryName.startsWith('web/')) {
     const parentField = fields.find(f => f.id.toLowerCase().includes('parent'));
     if (parentField) {
       const v = getFieldVal(entryFields[parentField.id], locale);
-      if (!v) {
-        issues.errors.push({ category: 'lyft', title: 'Missing: parent_entry_name', desc: 'All web/ articles must reference their section/category parent for IA placement.' });
-      }
+      if (!v) issues.incomplete.push({ category: 'lyft', title: 'Missing: parent_entry_name', desc: 'All web/ articles must reference their section/category parent for IA placement.' });
     }
   }
 
-  // compliance/ articles must be reviewed annually
+  // Compliance expired → Outdated
   if (entryName.startsWith('compliance/')) {
     const daysSince = (Date.now() - new Date(entry.sys.updatedAt).getTime()) / 86400000;
-    if (daysSince > 365) {
-      issues.errors.push({ category: 'lyft', title: `Compliance article overdue for review (${Math.floor(daysSince/30)} months old)`, desc: 'compliance/ articles must be reviewed and updated at least annually.' });
-    }
+    if (daysSince > 365) issues.outdated.push({ category: 'expired', subtype: 'expired', title: `Expired — compliance review overdue (${Math.floor(daysSince/30)} months)`, desc: 'compliance/ articles must be reviewed and updated at least annually.' });
   }
 
-  // Hyperlinks in body of app articles (should use buttons)
+  // Hyperlinks in app article body → Malformed
   if (entryName.startsWith('driver/') || entryName.startsWith('pax/')) {
     const bodyField = fields.find(f => f.id === 'body' || f.id === 'content' || f.id === 'bodyContent');
     if (bodyField) {
       const v = getFieldVal(entryFields[bodyField.id], locale);
-      if (v && v.nodeType === 'document' && JSON.stringify(v).includes('"hyperlink"')) {
-        issues.errors.push({ category: 'lyft', title: 'Hyperlinks found in body', desc: 'App articles must use Button components, not hyperlinks. Replace all hyperlinks with button entries.' });
-      }
+      if (v && v.nodeType === 'document' && JSON.stringify(v).includes('"hyperlink"'))
+        issues.malformed.push({ category: 'lyft', title: 'Hyperlinks in body', desc: 'App articles must use Button components, not hyperlinks. Replace all hyperlinks with button entries.' });
     }
   }
 
-  // Button accessibility hints
+  // Button accessibility hints → Incomplete (missing) or Malformed (wrong format)
   if (entryContentType.toLowerCase().includes('button')) {
     const hintField = fields.find(f => f.id.toLowerCase().includes('accessibility') || f.id.toLowerCase().includes('hint'));
     if (hintField) {
       const v = getFieldVal(entryFields[hintField.id], locale);
-      if (!v) {
-        issues.errors.push({ category: 'lyft', title: 'Missing: Accessibility hint', desc: 'Buttons require an accessibility hint starting with "Tap to..."' });
-      } else if (typeof v === 'string' && !v.toLowerCase().startsWith('tap to')) {
-        issues.warnings.push({ category: 'lyft', title: 'Accessibility hint format', desc: `Must start with "Tap to..." — found: "${v}"` });
-      }
+      if (!v) issues.incomplete.push({ category: 'lyft', title: 'Missing: Accessibility hint', desc: 'Buttons require an accessibility hint starting with "Tap to..."' });
+      else if (typeof v === 'string' && !v.toLowerCase().startsWith('tap to'))
+        issues.malformed.push({ category: 'lyft', title: 'Accessibility hint format', desc: `Must start with "Tap to..." — found: "${v}"` });
     }
   }
 
-  // Compass SR: keywords required
+  // Compass SR: keywords → Incomplete
   if (entryContentType.toLowerCase().includes('submissionreason') || entryContentType.toLowerCase().includes('submission_reason')) {
     const kwField = fields.find(f => f.id.toLowerCase().includes('keyword'));
     if (kwField) {
       const v = getFieldVal(entryFields[kwField.id], locale);
-      if (!v || (Array.isArray(v) && v.length === 0)) {
-        issues.errors.push({ category: 'lyft', title: 'Missing: Search Keywords on Submission Reason', desc: 'Keywords are required for agent discoverability in Compass.' });
-      }
+      if (!v || (Array.isArray(v) && v.length === 0))
+        issues.incomplete.push({ category: 'lyft', title: 'Missing: Search Keywords on Submission Reason', desc: 'Keywords are required for agent discoverability in Compass.' });
     }
   }
 
@@ -2594,6 +2586,42 @@ function filterByType(ctId) {
 function filterEntries() {
   applyFilters();
   renderEntryTable();
+  renderActiveColFilters();
+}
+
+function renderActiveColFilters() {
+  const bar = document.getElementById('activeColFilters');
+  if (!bar) return;
+  const chips = [];
+  if (columnFilters.contentType) {
+    const ct = contentTypes.find(c => c.sys.id === columnFilters.contentType);
+    chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;background:white;border:1px solid #bfdbfe;border-radius:99px;padding:2px 8px;font-weight:600;color:var(--primary)">
+      Type: ${esc(ct ? ct.name : columnFilters.contentType)}
+      <button onclick="setColumnFilter('contentType','')" style="background:none;border:none;cursor:pointer;color:#93c5fd;font-size:12px;line-height:1;padding:0 2px">✕</button>
+    </span>`);
+  }
+  if (columnFilters.audit) {
+    const labels = {incomplete:'Incomplete',malformed:'Malformed',outdated:'Outdated',misclassified:'Misclassified',convention:'Convention',ok:'No issues','not-audited':'Not audited'};
+    chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;background:white;border:1px solid #bfdbfe;border-radius:99px;padding:2px 8px;font-weight:600;color:var(--primary)">
+      Audit: ${labels[columnFilters.audit] || columnFilters.audit}
+      <button onclick="setColumnFilter('audit','')" style="background:none;border:none;cursor:pointer;color:#93c5fd;font-size:12px;line-height:1;padding:0 2px">✕</button>
+    </span>`);
+  }
+  if (columnFilters.aiAssist) {
+    const labels = {enabled:'AI enabled',missing:'Missing prompt',na:'Not applicable'};
+    chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;background:white;border:1px solid #bfdbfe;border-radius:99px;padding:2px 8px;font-weight:600;color:var(--primary)">
+      AI: ${labels[columnFilters.aiAssist] || columnFilters.aiAssist}
+      <button onclick="setColumnFilter('aiAssist','')" style="background:none;border:none;cursor:pointer;color:#93c5fd;font-size:12px;line-height:1;padding:0 2px">✕</button>
+    </span>`);
+  }
+  if (chips.length) {
+    bar.style.display = 'flex';
+    bar.innerHTML = `<span style="color:#1d4ed8;font-weight:700">Filters:</span> ${chips.join('')}
+      <button onclick="columnFilters={contentType:'',audit:'',aiAssist:''};filterEntries()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:#dc2626;font-size:11px;font-weight:700">Clear all ✕</button>`;
+  } else {
+    bar.style.display = 'none';
+    bar.innerHTML = '';
+  }
 }
 
 function entryMatchesAudience(entry, audience) {
@@ -2643,10 +2671,40 @@ function applyFilters() {
 
     if (auditF !== 'all') {
       const res = auditResults[entry.sys.id];
-      if (!res) return auditF !== 'ok';
-      if (auditF === 'error' && res.errors.length === 0) return false;
-      if (auditF === 'warning' && res.warnings.length === 0) return false;
-      if (auditF === 'ok' && (res.errors.length > 0 || res.warnings.length > 0)) return false;
+      if (!res) return auditF === 'ok' ? false : auditF !== 'ok';
+      const hasCritical = res.incomplete.length + res.malformed.length > 0;
+      const hasReview = res.outdated.length + res.misclassified.length > 0;
+      const hasConvention = res.convention.length > 0;
+      const hasAnyIssue = hasCritical || hasReview || hasConvention;
+      if (auditF === 'incomplete' && !res.incomplete.length) return false;
+      if (auditF === 'malformed' && !res.malformed.length) return false;
+      if (auditF === 'outdated' && !res.outdated.length) return false;
+      if (auditF === 'misclassified' && !res.misclassified.length) return false;
+      if (auditF === 'convention' && !res.convention.length) return false;
+      if (auditF === 'ok' && hasAnyIssue) return false;
+    }
+
+    // Column-level filters
+    if (columnFilters.contentType && entry.sys.contentType.sys.id !== columnFilters.contentType) return false;
+
+    if (columnFilters.audit) {
+      const res = auditResults[entry.sys.id];
+      if (columnFilters.audit === 'ok') {
+        if (!res) return false;
+        if (res.incomplete.length + res.malformed.length + res.outdated.length + res.misclassified.length + res.convention.length > 0) return false;
+      } else if (columnFilters.audit === 'not-audited') {
+        if (res) return false;
+      } else {
+        if (!res || !res[columnFilters.audit] || res[columnFilters.audit].length === 0) return false;
+      }
+    }
+
+    if (columnFilters.aiAssist) {
+      const ctN = (contentTypes.find(c => c.sys.id === entry.sys.contentType.sys.id)?.name || '').toLowerCase();
+      const isInApp = ctN.includes('hap ng') || ctN.includes('hap content');
+      if (columnFilters.aiAssist === 'enabled' && (!isInApp || aiAssistEnabled[entry.sys.id] !== true)) return false;
+      if (columnFilters.aiAssist === 'missing' && (!isInApp || aiAssistEnabled[entry.sys.id] !== false)) return false;
+      if (columnFilters.aiAssist === 'na' && isInApp) return false;
     }
 
     return true;
@@ -2681,9 +2739,15 @@ function renderEntryTable() {
     const auditRes = auditResults[entry.sys.id];
     let auditChips = '';
     if (auditRes) {
-      if (auditRes.errors.length) auditChips += `<span class="audit-chip chip-error">✕ ${auditRes.errors.length} error${auditRes.errors.length > 1 ? 's' : ''}</span>`;
-      if (auditRes.warnings.length) auditChips += `<span class="audit-chip chip-warning">⚠ ${auditRes.warnings.length} warn${auditRes.warnings.length > 1 ? 's' : ''}</span>`;
-      if (!auditRes.errors.length && !auditRes.warnings.length) auditChips = `<span class="audit-chip chip-ok">✓ OK</span>`;
+      const _crit = auditRes.incomplete.length + auditRes.malformed.length;
+      const _rev = auditRes.outdated.length + auditRes.misclassified.length;
+      const _conv = auditRes.convention.length;
+      if (auditRes.incomplete.length) auditChips += `<span class="audit-chip chip-error">Incomplete ×${auditRes.incomplete.length}</span>`;
+      if (auditRes.malformed.length) auditChips += `<span class="audit-chip chip-error">Malformed ×${auditRes.malformed.length}</span>`;
+      if (auditRes.misclassified.length) auditChips += `<span class="audit-chip chip-warning">Misclassified ×${auditRes.misclassified.length}</span>`;
+      if (auditRes.outdated.length) auditChips += `<span class="audit-chip chip-warning">Outdated ×${auditRes.outdated.length}</span>`;
+      if (!_crit && !_rev && _conv) auditChips = `<span class="audit-chip chip-warning" style="opacity:.7">Convention ×${_conv}</span>`;
+      if (!_crit && !_rev && !_conv) auditChips = `<span class="audit-chip chip-ok">✓ OK</span>`;
     } else {
       auditChips = `<span style="color:var(--text-muted);font-size:11px">—</span>`;
     }
@@ -2723,20 +2787,43 @@ function renderEntryTable() {
       </tr>`;
   }
 
+  const ctActiveClass = columnFilters.contentType ? ' active' : '';
+  const auditActiveClass = columnFilters.audit ? ' active' : '';
+  const aiActiveClass = columnFilters.aiAssist ? ' active' : '';
+
   setContent(`
     <table>
       <thead>
         <tr>
           <th>Title / ID</th>
-          <th>Content Type</th>
+          <th>
+            Content Type
+            <button class="col-filter-btn${ctActiveClass}" title="Filter by content type"
+              onclick="event.stopPropagation();openColFilter('contentType',this)">
+              ${columnFilters.contentType ? '●' : '⌄'}
+            </button>
+          </th>
           <th>Status</th>
-          <th>Audit</th>
-          <th>AI Assist</th>
+          <th>
+            Audit
+            <button class="col-filter-btn${auditActiveClass}" title="Filter by audit result"
+              onclick="event.stopPropagation();openColFilter('audit',this)">
+              ${columnFilters.audit ? '●' : '⌄'}
+            </button>
+          </th>
+          <th>
+            AI Assist
+            <button class="col-filter-btn${aiActiveClass}" title="Filter by AI Assist"
+              onclick="event.stopPropagation();openColFilter('aiAssist',this)">
+              ${columnFilters.aiAssist ? '●' : '⌄'}
+            </button>
+          </th>
           <th>Updated</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`);
+
 }
 
 function updateStats() {
@@ -2744,8 +2831,10 @@ function updateStats() {
   let errors = 0, warnings = 0, ok = 0;
   for (const id_ of Object.keys(auditResults)) {
     const r = auditResults[id_];
-    if (r.errors.length) errors++;
-    else if (r.warnings.length) warnings++;
+    const hasCrit = r.incomplete.length + r.malformed.length > 0;
+    const hasRev = r.outdated.length + r.misclassified.length > 0;
+    if (hasCrit) errors++;
+    else if (hasRev) warnings++;
     else ok++;
   }
   id('statTotal').textContent = total;
@@ -2799,7 +2888,7 @@ async function selectEntry(entryId) {
   }
 
   const res = auditResults[entryId];
-  const issueCount = (res ? res.errors.length + res.warnings.length : 0);
+  const issueCount = (res ? res.incomplete.length + res.malformed.length + res.misclassified.length + res.outdated.length : 0);
   const auditBadge = id('auditBadge');
   if (issueCount > 0) {
     auditBadge.textContent = issueCount;
@@ -2815,6 +2904,137 @@ function closeDetail() {
   id('detailPanel').classList.remove('open');
   selectedEntryId = null;
   renderEntryTable();
+}
+
+// ── Column filter panel (floating, fixed-position to avoid table overflow clipping) ──
+let _colFilterOpen = null; // which column is open
+
+function openColFilter(col, btnEl) {
+  const panel = document.getElementById('colFilterPanel');
+  if (!panel) return;
+
+  // If same column clicked again — close
+  if (_colFilterOpen === col) { closeAllColFilters(); return; }
+  _colFilterOpen = col;
+
+  // Position below the button
+  const rect = btnEl.getBoundingClientRect();
+  panel.style.top  = (rect.bottom + 6) + 'px';
+  panel.style.left = Math.min(rect.left, window.innerWidth - 310) + 'px';
+
+  // Build content
+  let html = '';
+
+  if (col === 'contentType') {
+    // Count entries per content type in current filtered set
+    const counts = {};
+    for (const e of filteredEntries) {
+      const ctId = e.sys.contentType.sys.id;
+      counts[ctId] = (counts[ctId] || 0) + 1;
+    }
+    const allSel = !columnFilters.contentType ? 'selected' : '';
+    html = `<input class="col-filter-search" placeholder="Search content types…" oninput="filterColDropdownSearch(this)" onclick="event.stopPropagation()" autofocus>
+      <div class="col-filter-list">
+        <div class="col-filter-option ${allSel}" onclick="setColumnFilter('contentType','')">
+          <span>All content types</span>
+        </div>
+        ${Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([ctId, cnt]) => {
+          const ct = contentTypes.find(c => c.sys.id === ctId);
+          const name = ct ? ct.name : ctId;
+          const sel = columnFilters.contentType === ctId ? 'selected' : '';
+          return `<div class="col-filter-option ${sel}" onclick="setColumnFilter('contentType','${ctId}')">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${esc(name)}</span>
+            <span class="col-filter-option-count">${cnt}</span>
+          </div>`;
+        }).join('')}
+      </div>
+      ${columnFilters.contentType ? `<div class="col-filter-clear" onclick="setColumnFilter('contentType','')">✕ Clear filter</div>` : ''}`;
+
+  } else if (col === 'audit') {
+    const opts = [
+      {v:'',l:'All audit results'},
+      {v:'incomplete',l:'✕ Incomplete',c:'#dc2626'},
+      {v:'malformed',l:'⚠ Malformed',c:'#dc2626'},
+      {v:'outdated',l:'⏱ Outdated',c:'#d97706'},
+      {v:'misclassified',l:'↕ Misclassified',c:'#d97706'},
+      {v:'convention',l:'ℹ Convention',c:'#2563eb'},
+      {v:'ok',l:'✓ No issues',c:'#16a34a'},
+      {v:'not-audited',l:'— Not audited'},
+    ];
+    html = `<div class="col-filter-list">
+      ${opts.map(o => `<div class="col-filter-option ${columnFilters.audit===o.v?'selected':''}" onclick="setColumnFilter('audit','${o.v}')">
+        <span ${o.c?`style="color:${o.c};font-weight:600"`:''}>${o.l}</span>
+      </div>`).join('')}
+    </div>
+    ${columnFilters.audit ? `<div class="col-filter-clear" onclick="setColumnFilter('audit','')">✕ Clear filter</div>` : ''}`;
+
+  } else if (col === 'aiAssist') {
+    const opts = [
+      {v:'',l:'All'},
+      {v:'enabled',l:'🤖 ✓ AI Assist enabled',c:'#16a34a'},
+      {v:'missing',l:'🤖 ✕ Missing prompt',c:'#dc2626'},
+      {v:'na',l:'— Not applicable'},
+    ];
+    html = `<div class="col-filter-list">
+      ${opts.map(o => `<div class="col-filter-option ${columnFilters.aiAssist===o.v?'selected':''}" onclick="setColumnFilter('aiAssist','${o.v}')">
+        <span ${o.c?`style="color:${o.c};font-weight:600"`:''}>${o.l}</span>
+      </div>`).join('')}
+    </div>
+    ${columnFilters.aiAssist ? `<div class="col-filter-clear" onclick="setColumnFilter('aiAssist','')">✕ Clear filter</div>` : ''}`;
+  }
+
+  panel.innerHTML = html;
+  panel.classList.add('open');
+
+  // Auto-focus search if present
+  const inp = panel.querySelector('.col-filter-search');
+  if (inp) setTimeout(() => inp.focus(), 30);
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', _outsideColFilter);
+  }, 0);
+}
+
+function _outsideColFilter(e) {
+  const panel = document.getElementById('colFilterPanel');
+  if (panel && !panel.contains(e.target) && !e.target.classList.contains('col-filter-btn')) {
+    closeAllColFilters();
+  }
+}
+
+function closeAllColFilters() {
+  _colFilterOpen = null;
+  const panel = document.getElementById('colFilterPanel');
+  if (panel) { panel.classList.remove('open'); panel.innerHTML = ''; }
+  document.removeEventListener('click', _outsideColFilter);
+}
+
+function filterColDropdownSearch(input) {
+  const q = input.value.toLowerCase();
+  const list = input.closest('#colFilterPanel')?.querySelector('.col-filter-list');
+  if (!list) return;
+  list.querySelectorAll('.col-filter-option').forEach(opt => {
+    opt.style.display = (!q || opt.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  });
+}
+
+function setColumnFilter(col, value) {
+  columnFilters[col] = value;
+  closeAllColFilters();
+  filterEntries();
+}
+
+// Quick-filter entry table by audit category (from dashboard cards)
+function applyQuickFilter(category) {
+  closeDetail();
+  const sel = id('auditFilter');
+  if (sel) { sel.value = category; }
+  filterEntries();
+  // Scroll to top
+  const wrap = id('contentArea');
+  if (wrap) wrap.scrollTop = 0;
+  showToast(`Showing entries with: ${category}`);
 }
 
 function switchTab(tab) {
@@ -3249,6 +3469,17 @@ function isCompassType(ct) {
   if (!ct) return false;
   const n = ct.name.toLowerCase();
   return n.includes('compass') || n.includes('submission reason') || n.includes('submission r');
+}
+
+function isFnolEntry(entry) {
+  // Exclude Compass Workflow entries related to FNOL — not owned by this team
+  const ct = contentTypes.find(c => c.sys.id === entry.sys.contentType.sys.id);
+  if (!ct) return false;
+  const ctName = ct.name.toLowerCase();
+  const isWorkflow = ctName.includes('workflow') || ctName.includes('compass workflow');
+  if (!isWorkflow) return false;
+  const title = getEntryTitle(entry).toLowerCase();
+  return title.includes('fnol');
 }
 
 // ── Compass Workflow Interactive Renderer ──────────────────────────────
@@ -3861,18 +4092,8 @@ function renderAuditTab() {
 
   let html = '';
 
-  const categories = {
-    required: { label: 'Required Fields', icon: '✕' },
-    localization: { label: 'Localization', icon: '🌐' },
-    seo: { label: 'SEO', icon: '🔍' },
-    assets: { label: 'Asset References', icon: '📎' },
-    stale: { label: 'Stale Content', icon: '⏱' },
-    unpublished: { label: 'Publishing', icon: '📤' },
-    draft: { label: 'Draft Changes', icon: '⇄' },
-    custom: { label: 'Custom Rules', icon: '⚙' }
-  };
-
-  if (res.errors.length === 0 && res.warnings.length === 0 && res.info.length === 0) {
+  const totalIssues = res.incomplete.length + res.malformed.length + res.misclassified.length + res.outdated.length + res.convention.length;
+  if (totalIssues === 0) {
     html = `<div class="audit-ok">✓ No issues found — this entry passes all audit checks.</div>`;
   }
 
@@ -3886,21 +4107,17 @@ function renderAuditTab() {
         </div>
       </div>`).join('');
 
-  if (res.errors.length) {
-    html += `<div class="audit-section"><div class="audit-section-title">✕ Errors (${res.errors.length})</div>`;
-    html += renderIssues(res.errors, 'issue-error', '✕');
-    html += `</div>`;
-  }
-
-  if (res.warnings.length) {
-    html += `<div class="audit-section"><div class="audit-section-title">⚠ Warnings (${res.warnings.length})</div>`;
-    html += renderIssues(res.warnings, 'issue-warning', '⚠');
-    html += `</div>`;
-  }
-
-  if (res.info.length) {
-    html += `<div class="audit-section"><div class="audit-section-title">ℹ Info (${res.info.length})</div>`;
-    html += renderIssues(res.info, 'issue-info', 'ℹ');
+  const sections = [
+    { key: 'incomplete', label: 'Incomplete', icon: '✕', css: 'issue-error' },
+    { key: 'malformed',  label: 'Malformed',  icon: '⚠', css: 'issue-error' },
+    { key: 'misclassified', label: 'Misclassified', icon: '↕', css: 'issue-warning' },
+    { key: 'outdated',   label: 'Outdated',   icon: '⏱', css: 'issue-warning' },
+    { key: 'convention', label: 'Convention', icon: 'ℹ', css: 'issue-info' },
+  ];
+  for (const s of sections) {
+    if (!res[s.key].length) continue;
+    html += `<div class="audit-section"><div class="audit-section-title">${s.icon} ${s.label} (${res[s.key].length})</div>`;
+    html += renderIssues(res[s.key], s.css, s.icon);
     html += `</div>`;
   }
 
@@ -4745,8 +4962,7 @@ function showOverview() {
   document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
   id('sidebarOverview').classList.add('active');
 
-  const total = allEntries.length;
-  if (!total) {
+  if (!allEntries.length) {
     setContent(`<div class="empty-state"><div class="empty-icon">🏠</div><div class="empty-title">No data yet</div><div class="empty-desc">Load a space first.</div></div>`);
     return;
   }
@@ -4755,25 +4971,31 @@ function showOverview() {
   const staleDays = config.staleDays || 90;
   const locale = locales.length ? locales[0].code : 'en-US';
 
+  // Exclude FNOL Compass Workflow entries — not owned by this team
+  const ownedEntries = allEntries.filter(e => !isFnolEntry(e));
+  const total = ownedEntries.length;
+
   // Aggregate by content type
   const byType = {};
-  for (const e of allEntries) {
+  for (const e of ownedEntries) {
     const ctId = e.sys.contentType.sys.id;
     byType[ctId] = (byType[ctId] || 0) + 1;
   }
 
-  // Audit health
+  // Audit health (owned entries only)
   let errCount = 0, warnCount = 0, okCount = 0, staleCount = 0;
-  for (const e of allEntries) {
+  for (const e of ownedEntries) {
     const r = auditResults[e.sys.id];
     const days = (now - new Date(e.sys.updatedAt).getTime()) / 86400000;
     if (days > staleDays) staleCount++;
     if (!r) continue;
-    if (r.errors.length) errCount++;
-    else if (r.warnings.length) warnCount++;
+    const hasCrit = r.incomplete.length + r.malformed.length > 0;
+    const hasRev = r.outdated.length + r.misclassified.length > 0;
+    if (hasCrit) errCount++;
+    else if (hasRev) warnCount++;
     else okCount++;
   }
-  const audited = Object.keys(auditResults).length;
+  const audited = ownedEntries.filter(e => auditResults[e.sys.id]).length;
   const healthPct = audited ? Math.round((okCount / audited) * 100) : null;
 
   // AI Assist coverage (from entries we've already checked)
@@ -4781,23 +5003,25 @@ function showOverview() {
   const aiEnabled = Object.values(aiAssistEnabled).filter(v => v === true).length;
   const aiMissing = Object.values(aiAssistEnabled).filter(v => v === false).length;
 
-  // Recently updated (last 30 days)
-  const recentEntries = allEntries
+  // Recently updated (last 30 days, owned entries only)
+  const recentEntries = ownedEntries
     .filter(e => (now - new Date(e.sys.updatedAt).getTime()) / 86400000 < 30)
     .sort((a, b) => new Date(b.sys.updatedAt) - new Date(a.sys.updatedAt))
     .slice(0, 8);
 
-  // Most stale entries (overdue for staleDays threshold)
-  const staleEntries = allEntries
+  // Most stale entries (overdue for staleDays threshold, owned entries only)
+  const staleEntries = ownedEntries
     .filter(e => (now - new Date(e.sys.updatedAt).getTime()) / 86400000 > staleDays)
     .sort((a, b) => new Date(a.sys.updatedAt) - new Date(b.sys.updatedAt))
     .slice(0, 8);
 
-  const statCard = (label, value, sub, color='var(--text)') => `
-    <div style="background:var(--surface-2,#f8fafc);border-radius:10px;padding:14px 16px;min-width:0">
+  const statCard = (label, value, sub, color='var(--text)', clickAction='') => `
+    <div style="background:var(--surface-2,#f8fafc);border-radius:10px;padding:14px 16px;min-width:0;${clickAction ? 'cursor:pointer;transition:box-shadow .15s,transform .1s' : ''}"
+      ${clickAction ? `onclick="${clickAction}" onmouseenter="this.style.boxShadow='0 0 0 2px var(--primary)';this.style.transform='translateY(-1px)'" onmouseleave="this.style.boxShadow='';this.style.transform=''"` : ''}>
       <div style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">${label}</div>
       <div style="font-size:26px;font-weight:800;color:${color};line-height:1">${value}</div>
       ${sub ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">${sub}</div>` : ''}
+      ${clickAction ? `<div style="font-size:10px;color:var(--primary);margin-top:6px;font-weight:600">Click to filter →</div>` : ''}
     </div>`;
 
   const entryRow = (e) => {
@@ -4832,9 +5056,9 @@ function showOverview() {
 
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
       ${statCard('Total entries', total.toLocaleString())}
-      ${statCard('Stale content', staleCount.toLocaleString(), `>${staleDays} days without update`, staleCount > 0 ? '#d97706' : 'var(--text)')}
-      ${statCard('Audit errors', errCount.toLocaleString(), `${audited.toLocaleString()} entries audited`, errCount > 0 ? '#dc2626' : 'var(--text)')}
-      ${healthPct !== null ? statCard('Audit health', healthPct + '%', `${okCount} of ${audited} audited entries passing`, healthPct >= 80 ? '#16a34a' : healthPct >= 50 ? '#d97706' : '#dc2626') : statCard('Audit health', '—', 'Run audit to see score')}
+      ${statCard('Stale content', staleCount.toLocaleString(), `>${staleDays} days without update`, staleCount > 0 ? '#d97706' : 'var(--text)', staleCount > 0 ? "applyQuickFilter('outdated')" : '')}
+      ${statCard('Audit errors', errCount.toLocaleString(), `${audited.toLocaleString()} entries audited`, errCount > 0 ? '#dc2626' : 'var(--text)', errCount > 0 ? "showAuditDashboard('errors')" : '')}
+      ${healthPct !== null ? statCard('Audit health', healthPct + '%', `${okCount} of ${audited} audited entries passing`, healthPct >= 80 ? '#16a34a' : healthPct >= 50 ? '#d97706' : '#dc2626', okCount > 0 ? "showAuditDashboard('ok')" : '') : statCard('Audit health', '—', 'Run audit to see score')}
     </div>
 
     ${(() => {
@@ -4875,7 +5099,10 @@ function showOverview() {
         <div style="background:var(--surface-2,#f8fafc);border-radius:10px;padding:10px 14px">${topTypes}</div>
       </div>
       <div>
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:8px">Most stale (click to open)</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted)">Most stale</div>
+          ${staleEntries.length ? `<button onclick="applyQuickFilter('outdated')" style="font-size:11px;color:var(--primary);background:none;border:none;cursor:pointer;font-weight:600">View all →</button>` : ''}
+        </div>
         <div style="background:var(--surface-2,#f8fafc);border-radius:10px;padding:2px 14px">
           ${staleEntries.length ? staleEntries.map(entryRow).join('') : '<div style="padding:12px 0;font-size:12px;color:var(--text-muted)">No stale entries found.</div>'}
         </div>
@@ -4890,9 +5117,18 @@ function showOverview() {
   </div>`);
 }
 
-function showAuditDashboard() {
+function showAuditDashboard(drillFilter) {
   closeDetail();
-  const totalAudited = Object.keys(auditResults).length;
+  if (drillFilter !== undefined) auditDashFilter = drillFilter;
+
+  // Exclude FNOL Compass Workflow entries — not owned by this team
+  const ownedAuditResults = Object.fromEntries(
+    Object.entries(auditResults).filter(([eid]) => {
+      const entry = allEntries.find(e => e.sys.id === eid);
+      return entry && !isFnolEntry(entry);
+    })
+  );
+  const totalAudited = Object.keys(ownedAuditResults).length;
   if (!totalAudited) {
     setContent(`<div class="empty-state">
       <div class="empty-icon">📊</div>
@@ -4903,74 +5139,174 @@ function showAuditDashboard() {
     return;
   }
 
+  // Aggregate counts per category
   let totalErrors = 0, totalWarnings = 0, totalOk = 0;
-  const entriesWithErrors = [], entriesWithWarnings = [];
+  const byCategory = { incomplete: [], malformed: [], outdated: [], misclassified: [], convention: [], ok: [] };
 
-  for (const [entryId, res] of Object.entries(auditResults)) {
-    if (res.errors.length) { totalErrors++; entriesWithErrors.push(entryId); }
-    else if (res.warnings.length) { totalWarnings++; entriesWithWarnings.push(entryId); }
+  for (const [entryId, res] of Object.entries(ownedAuditResults)) {
+    const hasCrit = res.incomplete.length + res.malformed.length > 0;
+    const hasRev  = res.outdated.length + res.misclassified.length > 0;
+    const hasConv = res.convention.length > 0;
+    if (hasCrit) totalErrors++;
+    else if (hasRev) totalWarnings++;
     else totalOk++;
+    if (res.incomplete.length)    byCategory.incomplete.push(entryId);
+    if (res.malformed.length)     byCategory.malformed.push(entryId);
+    if (res.outdated.length)      byCategory.outdated.push(entryId);
+    if (res.misclassified.length) byCategory.misclassified.push(entryId);
+    if (res.convention.length)    byCategory.convention.push(entryId);
+    if (!hasCrit && !hasRev && !hasConv) byCategory.ok.push(entryId);
   }
 
+  // Card builder (clickable)
+  const dashCard = (label, value, color, borderColor, filterKey, subLabel='') => {
+    const isActive = auditDashFilter === filterKey;
+    return `<div class="summary-card" style="cursor:pointer;border:2px solid ${isActive ? borderColor : 'transparent'};background:${isActive ? borderColor+'18' : 'var(--surface)'};transition:all .15s"
+      onclick="showAuditDashboard('${filterKey}')"
+      onmouseenter="this.style.borderColor='${borderColor}';this.style.transform='translateY(-2px)'"
+      onmouseleave="this.style.borderColor='${isActive ? borderColor : 'transparent'}';this.style.transform=''">
+      <div class="summary-card-value" style="color:${color}">${value.toLocaleString()}</div>
+      <div class="summary-card-label">${label}</div>
+      ${subLabel ? `<div style="font-size:10px;color:var(--text-muted);margin-top:3px">${subLabel}</div>` : ''}
+      <div style="font-size:10px;color:${color};margin-top:6px;font-weight:700;opacity:.8">${isActive ? '▲ Showing list' : 'Click to filter →'}</div>
+    </div>`;
+  };
+
   let html = `<div style="padding:20px">
-    <div style="font-size:18px;font-weight:700;margin-bottom:16px">📊 Audit Dashboard</div>
-    <div class="audit-summary-grid">
-      <div class="summary-card card-error">
-        <div class="summary-card-value" style="color:var(--error)">${totalErrors}</div>
-        <div class="summary-card-label">Entries with errors</div>
-      </div>
-      <div class="summary-card card-warning">
-        <div class="summary-card-value" style="color:var(--warning)">${totalWarnings}</div>
-        <div class="summary-card-label">Entries with warnings</div>
-      </div>
-      <div class="summary-card card-ok">
-        <div class="summary-card-value" style="color:var(--success)">${totalOk}</div>
-        <div class="summary-card-label">Entries passing</div>
-      </div>
-      <div class="summary-card">
-        <div class="summary-card-value">${totalAudited}</div>
-        <div class="summary-card-label">Total audited</div>
-      </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:18px;font-weight:700">📊 Audit Dashboard</div>
+      ${auditDashFilter ? `<button class="btn" onclick="auditDashFilter=null;showAuditDashboard()" style="font-size:12px">✕ Clear filter</button>` : ''}
+    </div>
+    <div class="audit-summary-grid" style="margin-bottom:16px">
+      ${dashCard('Entries with errors', totalErrors, 'var(--error)', '#dc2626', 'errors', 'Incomplete + Malformed')}
+      ${dashCard('Entries with warnings', totalWarnings, 'var(--warning)', '#d97706', 'warnings', 'Outdated + Misclassified')}
+      ${dashCard('Entries passing', totalOk, 'var(--success)', '#16a34a', 'ok')}
+      ${dashCard('Total audited', totalAudited, 'var(--text)', '#6b7280', 'all')}
+    </div>
+
+    <!-- Category chips row -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;align-items:center">
+      <span style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Filter by:</span>
+      ${[
+        { key:'incomplete',    label:'✕ Incomplete',    color:'#dc2626', bg:'#fef2f2', count: byCategory.incomplete.length },
+        { key:'malformed',     label:'⚠ Malformed',     color:'#dc2626', bg:'#fef2f2', count: byCategory.malformed.length },
+        { key:'outdated',      label:'⏱ Outdated',      color:'#d97706', bg:'#fffbeb', count: byCategory.outdated.length },
+        { key:'misclassified', label:'↕ Misclassified', color:'#d97706', bg:'#fffbeb', count: byCategory.misclassified.length },
+        { key:'convention',    label:'ℹ Convention',    color:'#2563eb', bg:'#eff6ff', count: byCategory.convention.length },
+      ].map(c => {
+        const isA = auditDashFilter === c.key;
+        return `<button onclick="showAuditDashboard('${c.key}')" style="
+          padding:5px 12px;border-radius:20px;border:1.5px solid ${isA ? c.color : c.bg};
+          background:${isA ? c.color : c.bg};color:${isA ? '#fff' : c.color};
+          font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap"
+          onmouseenter="this.style.borderColor='${c.color}'"
+          onmouseleave="this.style.borderColor='${isA ? c.color : c.bg}'"
+        >${c.label} (${c.count})</button>`;
+      }).join('')}
+      <button onclick="applyQuickFilter(id('auditFilter')?.value||'all');showToast('Showing in entry table')" style="
+        padding:5px 12px;border-radius:20px;border:1.5px solid var(--border);background:white;
+        color:var(--primary);font-size:11px;font-weight:700;cursor:pointer;margin-left:auto">
+        ↗ Show in entry table
+      </button>
     </div>
 
     <details style="margin-bottom:16px;background:var(--surface-2,#f8fafc);border-radius:8px;padding:10px 14px;font-size:12px">
       <summary style="cursor:pointer;font-weight:700;color:var(--text-muted);user-select:none">What gets flagged?</summary>
       <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
-        <div><span style="color:var(--error);font-weight:700">✕ Errors</span> — missing required fields (body, AI Assist prompt, keywords), broken slug format, entries not updated in over 90 days on critical types.</div>
-        <div><span style="color:var(--warning);font-weight:700">⚠ Warnings</span> — stale content (90+ days without update), AI Assist prompt wrong format, missing translation context, rider-only tag missing on pax/ articles.</div>
-        <div><span style="color:var(--info,#2563eb);font-weight:700">ℹ Info</span> — non-blocking notes like naming conventions and optional field suggestions.</div>
+        <div><span style="color:var(--error);font-weight:700">Incomplete</span> — missing required fields (body, AI Assist prompt, keywords, accessibility hint).</div>
+        <div><span style="color:var(--error);font-weight:700">Malformed</span> — broken slug format, wrong separator (hyphens vs underscores), AI Assist prompt wrong format, hyperlinks in app article body.</div>
+        <div><span style="color:var(--warning);font-weight:700">Misclassified</span> — missing rider-only tag on pax/ articles, missing translation context.</div>
+        <div><span style="color:var(--warning);font-weight:700">Outdated</span> — Aging (60–90 days, FYI), Stale (90+ days, needs review), Expired (past defined refresh cadence).</div>
+        <div><span style="color:var(--info,#2563eb);font-weight:700">Convention</span> — naming suggestions, optional field notes, draft changes not yet published.</div>
       </div>
     </details>`;
 
-  if (entriesWithErrors.length) {
-    html += `<div style="font-size:13px;font-weight:700;margin-bottom:8px;color:var(--error)">✕ Entries with errors</div>`;
-    for (const entryId of entriesWithErrors.slice(0, 50)) {
-      const entry = allEntries.find(e => e.sys.id === entryId);
-      if (!entry) continue;
-      const res = auditResults[entryId];
-      html += `<div class="issue-entry-row" onclick="selectEntry('${entryId}')">
-        <div class="issue-entry-row-title">${esc(getEntryTitle(entry))}</div>
-        <div class="issue-entry-row-meta">${res.errors.map(e => e.title).join(' · ')}</div>
-      </div>`;
-    }
-    html += `<div style="height:16px"></div>`;
-  }
+  // Drilldown list
+  const filter = auditDashFilter;
+  if (filter) {
+    // Determine which entries to show
+    let targetIds = [];
+    let listTitle = '', listColor = 'var(--text)', listIcon = '';
 
-  if (entriesWithWarnings.length) {
-    html += `<div style="font-size:13px;font-weight:700;margin-bottom:8px;color:var(--warning)">⚠ Entries with warnings</div>`;
-    for (const entryId of entriesWithWarnings.slice(0, 50)) {
+    if (filter === 'errors') {
+      targetIds = [...new Set([...byCategory.incomplete, ...byCategory.malformed])];
+      listTitle = 'Entries with errors'; listColor = 'var(--error)'; listIcon = '✕';
+    } else if (filter === 'warnings') {
+      targetIds = [...new Set([...byCategory.outdated, ...byCategory.misclassified])];
+      listTitle = 'Entries with warnings'; listColor = 'var(--warning)'; listIcon = '⚠';
+    } else if (filter === 'ok') {
+      targetIds = byCategory.ok;
+      listTitle = 'Entries passing'; listColor = 'var(--success)'; listIcon = '✓';
+    } else if (filter === 'all') {
+      targetIds = Object.keys(ownedAuditResults);
+      listTitle = 'All audited entries'; listColor = 'var(--text)'; listIcon = '▦';
+    } else {
+      targetIds = byCategory[filter] || [];
+      const meta = { incomplete:{l:'Incomplete',c:'var(--error)',i:'✕'}, malformed:{l:'Malformed',c:'var(--error)',i:'⚠'}, outdated:{l:'Outdated',c:'var(--warning)',i:'⏱'}, misclassified:{l:'Misclassified',c:'var(--warning)',i:'↕'}, convention:{l:'Convention',c:'#2563eb',i:'ℹ'} };
+      const m = meta[filter] || {};
+      listTitle = m.l || filter; listColor = m.c || 'var(--text)'; listIcon = m.i || '';
+    }
+
+    const shown = targetIds.slice(0, 100);
+    const hasMore = targetIds.length > 100;
+
+    html += `<div style="border-top:1px solid var(--border);padding-top:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div style="font-size:14px;font-weight:700;color:${listColor}">${listIcon} ${listTitle} <span style="font-size:12px;font-weight:400;color:var(--text-muted)">(${targetIds.length} entries)</span></div>
+        <div style="display:flex;gap:8px">
+          <button onclick="applyQuickFilter('${['errors','warnings','all'].includes(filter) ? (filter==='errors'?'incomplete':filter==='warnings'?'outdated':'all') : filter}')" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:white;cursor:pointer;color:var(--primary);font-weight:600">↗ Open in entry table</button>
+        </div>
+      </div>`;
+
+    // Search box for drilldown
+    html += `<div style="margin-bottom:10px">
+      <input id="dashSearch" type="text" placeholder="Search in this list…" oninput="filterDashList()" style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none">
+    </div>
+    <div id="dashList">`;
+
+    for (const entryId of shown) {
       const entry = allEntries.find(e => e.sys.id === entryId);
       if (!entry) continue;
-      const res = auditResults[entryId];
-      html += `<div class="issue-entry-row" onclick="selectEntry('${entryId}')">
-        <div class="issue-entry-row-title">${esc(getEntryTitle(entry))}</div>
-        <div class="issue-entry-row-meta">${res.warnings.map(w => w.title).join(' · ')}</div>
+      const res = ownedAuditResults[entryId];
+      const ct = contentTypes.find(c => c.sys.id === entry.sys.contentType.sys.id);
+      const updDays = Math.floor((Date.now() - new Date(entry.sys.updatedAt).getTime()) / 86400000);
+
+      // Determine which issues to show for this filter
+      let issues = [];
+      if (filter === 'errors' || filter === 'incomplete') issues = res.incomplete;
+      else if (filter === 'malformed') issues = res.malformed;
+      else if (filter === 'warnings' || filter === 'outdated') issues = res.outdated;
+      else if (filter === 'misclassified') issues = res.misclassified;
+      else if (filter === 'convention') issues = res.convention;
+      else if (filter === 'all') issues = [...res.incomplete, ...res.malformed, ...res.outdated, ...res.misclassified, ...res.convention];
+      else if (filter === 'ok') issues = [];
+
+      html += `<div class="issue-entry-row" onclick="selectEntry('${entryId}')" style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center">
+        <div>
+          <div class="issue-entry-row-title" style="font-weight:600">${esc(getEntryTitle(entry))}</div>
+          <div class="issue-entry-row-meta" style="margin-top:2px">${ct ? esc(ct.name) : ''} · ${updDays}d ago${issues.length ? ' · ' + issues.map(i => i.title).join(' · ') : ''}</div>
+        </div>
+        <span style="font-size:10px;color:var(--primary);white-space:nowrap;font-weight:600">Open →</span>
       </div>`;
     }
+
+    html += `</div>`; // #dashList
+    if (hasMore) html += `<div style="text-align:center;padding:12px;font-size:12px;color:var(--text-muted)">Showing 100 of ${targetIds.length}. Use "Open in entry table" to see all.</div>`;
+    html += `</div>`; // drilldown container
   }
 
   html += `</div>`;
   setContent(html);
+}
+
+// Filter drilldown list by search input
+function filterDashList() {
+  const q = (id('dashSearch')?.value || '').toLowerCase().trim();
+  const rows = id('dashList')?.querySelectorAll('.issue-entry-row') || [];
+  for (const row of rows) {
+    const text = row.textContent.toLowerCase();
+    row.style.display = (!q || text.includes(q)) ? '' : 'none';
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -4988,8 +5324,8 @@ function exportAudit() {
       getEntryTitle(entry),
       ct ? ct.name : entry.sys.contentType.sys.id,
       hasChanges ? 'Has changes' : 'Published',
-      res ? res.errors.map(e => e.title).join('; ') : 'Not audited',
-      res ? res.warnings.map(w => w.title).join('; ') : '',
+      res ? [...res.incomplete, ...res.malformed].map(e => e.title).join('; ') : 'Not audited',
+      res ? [...res.outdated, ...res.misclassified].map(w => w.title).join('; ') : '',
       formatDate(entry.sys.updatedAt)
     ]);
   }

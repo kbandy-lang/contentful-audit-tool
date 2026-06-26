@@ -454,7 +454,10 @@
       border-bottom: 1px solid var(--border);
       padding: 0 16px;
       background: white;
+      overflow-x: auto;
+      scrollbar-width: none;
     }
+    .tabs::-webkit-scrollbar { display: none; }
 
     .tab-btn {
       padding: 10px 14px;
@@ -1547,6 +1550,25 @@
     <span class="sidebar-item-icon">📊</span>
     <span class="sidebar-item-label">AI Assist</span>
   </div>
+  <div class="sidebar-item" id="sidebarTagLibrary" onclick="showTagLibrary()">
+    <span class="sidebar-item-icon">🏷</span>
+    <span class="sidebar-item-label">Tag Library</span>
+  </div>
+  <div class="sidebar-item" onclick="document.getElementById('importTagsInput').click()" title="Import bulk AI tag suggestions from JSON file">
+    <span class="sidebar-item-icon">⬆</span>
+    <span class="sidebar-item-label">Import Suggestions</span>
+  </div>
+  <input type="file" id="importTagsInput" accept=".json" style="display:none" onchange="importTagSuggestions(this)">
+  <div class="sidebar-item" id="sidebarApprovalQueue" onclick="showApprovalQueue()">
+    <span class="sidebar-item-icon">✅</span>
+    <span class="sidebar-item-label">Approval Queue</span>
+    <span class="sidebar-count" id="approvalQueueCount" style="display:none">0</span>
+  </div>
+  <div class="sidebar-item" id="sidebarFlagged" onclick="showFlaggedEntries()">
+    <span class="sidebar-item-icon">⚑</span>
+    <span class="sidebar-item-label">Tag Issues</span>
+    <span class="sidebar-count" id="flaggedCount" style="display:none">0</span>
+  </div>
   <div class="sidebar-divider"></div>
   <div class="sidebar-header">Content Types</div>
   <div id="sidebarItems">
@@ -1665,6 +1687,7 @@
     <button class="tab-btn" id="tab-edit" onclick="switchTab('edit')">✏ Edit</button>
     <button class="tab-btn" id="tab-info" onclick="switchTab('info')">ℹ Info</button>
     <button class="tab-btn" id="tab-guide" onclick="switchTab('guide')">? Guide</button>
+    <button class="tab-btn" id="tab-tags" onclick="switchTab('tags')">🏷 Tags</button>
   </div>
   <div class="tab-content" id="tabContent">
     <div class="loading-state"><div class="spinner"></div><div>Loading entry…</div></div>
@@ -1736,6 +1759,16 @@
       <div class="form-group">
         <label class="form-label">Flag entries not updated in X days</label>
         <input class="form-input" id="cfg_staleDays" type="number" min="1" max="3650" style="font-family:inherit" placeholder="90">
+      </div>
+    </div>
+
+    <div class="space-config">
+      <div class="space-config-title">AI Tag Suggestions</div>
+      <div class="form-group">
+        <div class="form-row">
+          <label class="form-label">Claude API Key <span style="font-size:10px;color:var(--text-muted)">(for AI tag suggestions)</span></label>
+          <input class="form-input" id="cfg_claudeApiKey" type="password" placeholder="sk-ant-..." style="font-family:monospace">
+        </div>
       </div>
     </div>
 
@@ -1861,7 +1894,106 @@ let detailContentType = null;
 let aiAssistEnabled = {};    // map of entryId → true | false | null (null = not an app article)
 let hexMetrics = {};         // map of article slug → {views, escalations, escalation_rate, resolve_score, ...}
 let auditDashFilter = null;  // null = show cards, 'errors'|'warnings'|'ok'|'incomplete'|'malformed'|'outdated'|'misclassified'|'convention' = drilldown
-let columnFilters = { contentType: '', audit: '', aiAssist: '' };  // column-level filters for the entry table
+let columnFilters = { contentType: '', audit: '', aiAssist: '', tag: '' };  // column-level filters for the entry table
+let tagStates = JSON.parse(localStorage.getItem('cftTagStates') || '{}');
+let claudeApiKey = localStorage.getItem('cftClaudeApiKey') || '';
+
+// KM Taxonomy definitions from the SCC KM Taxonomy & Governance document
+const KM_TAXONOMY = [
+  { id: 'driver', name: 'Driver', parent: null, lob: true, def: 'Content that only includes Driver themes, including earnings, compliance, XD, fleet, and regional policy.' },
+  { id: 'rider', name: 'Rider', parent: null, lob: true, def: 'Content that only includes Rider themes.' },
+  { id: 'safety', name: 'Safety', parent: null, lob: true, def: 'Safety takes LOB precedence — if content has a safety theme at any point, Safety is the LOB tag.' },
+  { id: 'location', name: 'Location', parent: null, def: 'Use for content specific to a certain location (US, Puerto Rico, Canada, Europe).' },
+  { id: 'region', name: 'Region', parent: null, def: 'Use for content specific to a certain region (e.g. NY).' },
+  { id: 'ride-xp', name: 'Ride XP', parent: null, def: 'All interactions during the ride experience — airport pickups, cancellations, no-shows, tolls, lost items, damage, ratings, ride types, and scheduled rides.' },
+  { id: 'airport', name: 'Airport', parent: 'ride-xp', def: 'Airport pickup rules, procedures, and logistics. FIFO queue, long pickups, airport bonus zones, rider preferences.' },
+  { id: 'lost-or-found', name: 'Lost or Found', parent: 'ride-xp', def: 'How riders report and recover a lost item, or lost-and-found policies for Lyft Pink members.' },
+  { id: 'damage', name: 'Damage', parent: 'ride-xp', def: 'Vehicle damage or cleanliness issues during a Lyft ride — cleaning fee requests, damage disputes, unsafe vehicles.' },
+  { id: 'rating', name: 'Rating', parent: 'ride-xp', def: 'Driver and rider rating system on the Lyft platform.' },
+  { id: 'deactivation', name: 'Deactivation', parent: 'ride-xp', def: 'Why an account may be deactivated and what steps a user can take in response.' },
+  { id: 'appeal', name: 'Appeal', parent: 'ride-xp', def: 'Formal contestation process for account deactivations.' },
+  { id: 'ride-mode', name: 'Ride Mode', parent: 'ride-xp', def: 'Driver-facing ride settings and mode configurations — Standard, Wait & Save, Priority Pickup, Green, Taxis, Extra Comfort, Black, Black SUV, XL, XXL, Car Seat, Pet.' },
+  { id: 'profile', name: 'Profile', parent: 'ride-xp', def: 'Viewing or updating personal details on a driver or rider account.' },
+  { id: 'hardware', name: 'Hardware', parent: 'ride-xp', def: 'Physical devices like CarPlay, Android Auto, Amp, Glow.' },
+  { id: 'software', name: 'Software', parent: 'ride-xp', def: 'Device operating systems, version requirements, OS compatibility, iOS and Android platform issues.' },
+  { id: 'earnings', name: 'Earnings', parent: null, def: 'Driver earnings topics broadly.' },
+  { id: 'fee-earnings', name: 'Fee (Earnings)', parent: 'earnings', def: 'Deductions or charges applied to driver earnings — service fees, platform fees, amounts subtracted from gross earnings.' },
+  { id: 'tolls-earnings', name: 'Tolls (Earnings)', parent: 'earnings', def: 'How tolls are handled during a trip, reimbursed, or passed through to the rider.' },
+  { id: 'payout', name: 'Payout', parent: 'earnings', def: 'How and when drivers receive their earnings.' },
+  { id: 'express-pay', name: 'Express Pay', parent: 'earnings', def: 'On-demand instant transfer of earnings.' },
+  { id: 'lyft-direct', name: 'Lyft Direct', parent: 'earnings', def: "Lyft's debit card/banking product for drivers." },
+  { id: 'weekly-payouts', name: 'Weekly Payouts', parent: 'earnings', def: 'Standard weekly earnings deposit cycle — when deposits process, bank account setup, missing deposits.' },
+  { id: 'taxes', name: 'Taxes', parent: 'earnings', def: 'Driver tax obligations and documentation, 1099 forms, annual earnings.' },
+  { id: 'bonus-zone', name: 'Bonus Zone', parent: 'earnings', def: 'How Bonus Zones work, eligibility, and how Bonus Zone earnings are calculated.' },
+  { id: 'ride-earnings', name: 'Ride Earnings', parent: 'earnings', def: 'General surge or primetime pricing for drivers.' },
+  { id: 'payment', name: 'Payment', parent: null, def: 'All financial interactions a rider has — charges, payment methods, fees, refunds, Lyft Cash, gift cards.' },
+  { id: 'ride-charge', name: 'Ride Charge', parent: 'payment', def: 'Total base fare amount charged to a rider for a specific ride.' },
+  { id: 'tolls', name: 'Tolls', parent: 'payment', def: 'Road, bridge, tunnel, or city zone fees added to a rider fare.' },
+  { id: 'fee', name: 'Fee', parent: 'payment', def: 'Additional charges on top of the base fare — service fee, cancellation fee.' },
+  { id: 'payment-method', name: 'Payment Method', parent: 'payment', def: 'How a rider chooses to pay — credit card, debit card, Apple Pay, PayPal, Lyft Cash.' },
+  { id: 'lyft-cash', name: 'Lyft Cash', parent: 'payment', def: 'Digital currency stored in a rider account for rides — adding funds, checking balance, troubleshooting.' },
+  { id: 'gift-cards', name: 'Gift Cards', parent: 'payment', def: 'Prepaid cards redeemable for Lyft Cash — purchasing, redeeming, troubleshooting.' },
+  { id: 'payment-issue', name: 'Payment Issue', parent: 'payment', def: 'Technical problems preventing a charge from processing correctly — failed payment, duplicate charge, billing error.' },
+  { id: 'lyft-rewards', name: 'Lyft Rewards', parent: null, def: 'Lyft loyalty program where drivers earn points for activity, unlocking tiered benefits and rewards.' },
+  { id: 'tiers', name: 'Tiers', parent: 'lyft-rewards', def: 'Levels within Lyft Rewards — Silver, Gold, Platinum, Elite.' },
+  { id: 'points', name: 'Points', parent: 'lyft-rewards', def: 'Currency drivers earn through Lyft activity, redeemable for cash, gift cards, or services.' },
+  { id: 'perks', name: 'Perks', parent: 'lyft-rewards', def: 'Specific benefits per tier — cashback on gas, roadside assistance, ride filters.' },
+  { id: 'programs', name: 'Programs', parent: null, def: 'Structured sets of features, benefits, or initiatives offered by Lyft to enhance rider experience.' },
+  { id: 'lyft-pink', name: 'Lyft Pink', parent: 'programs', def: 'Membership program with discounted rides, relaxed cancellation, and perks for a monthly/annual fee.' },
+  { id: 'lyft-silver', name: 'Lyft Silver', parent: 'programs', def: 'Experience designed for older adults with accessibility accommodations and tailored features.' },
+  { id: 'lyft-teen', name: 'Lyft Teen', parent: 'programs', def: 'Feature allowing teens to ride independently with safety features and trusted contact notifications.' },
+  { id: 'price-lock', name: 'Price Lock', parent: 'programs', def: 'Feature to lock in a set price for a recurring route, protecting from surge pricing.' },
+  { id: 'rider-rewards', name: 'Rider Rewards', parent: 'programs', def: 'Program for riders to earn points or benefits through platform activity and partnerships.' },
+  { id: 'referral', name: 'Referral', parent: 'rider-rewards', def: 'Earning credits or bonuses by inviting new users to join Lyft.' },
+  { id: 'partnerships', name: 'Partnerships', parent: null, def: 'Third-party relationships and integrations available to Lyft riders — travel rewards and other programs.' },
+  { id: 'compliance', name: 'Compliance', parent: null, def: 'Requirements drivers must meet to drive on Lyft — document submissions, background checks, ongoing verification.' },
+  { id: 'onboarding', name: 'Onboarding', parent: 'compliance', def: 'Overall process a new driver completes to become approved and active on Lyft.' },
+  { id: 'insurance', name: 'Insurance', parent: 'compliance', def: 'Proof of valid vehicle insurance a driver must submit and maintain.' },
+  { id: 'inspection', name: 'Inspection', parent: 'compliance', def: 'Vehicle inspection a driver must complete to meet Lyft safety and eligibility standards.' },
+  { id: 'drivers-license', name: "Driver's License", parent: 'compliance', def: 'Government-issued driver\'s license submitted to verify legal permission to operate a vehicle.' },
+  { id: 'registration', name: 'Registration', parent: 'compliance', def: 'Proof of current vehicle registration confirming the vehicle is legally registered for Lyft.' },
+  { id: 'dmv', name: 'DMV', parent: 'compliance', def: 'DMV records for verifying licensing status, driving history, violations, and restrictions.' },
+  { id: 'driving-history', name: 'Driving History', parent: 'dmv', def: 'Minimum driving experience requirement — insufficient history errors, driver abstracts, length-of-experience records.' },
+  { id: 'bgc', name: 'BGC (Background Check)', parent: 'compliance', def: 'Screening process reviewing criminal history for prospective and existing drivers.' },
+  { id: 'idv', name: 'IDV (Identity Verification)', parent: 'compliance', def: 'Real-time process confirming a driver\'s identity — selfie check, real-time ID confirmation.' },
+  { id: 'xd', name: 'XD (Express Drive)', parent: null, def: 'Express Drive rental program where drivers rent a vehicle to give rides on the Lyft platform.' },
+  { id: 'hertz', name: 'Hertz', parent: 'xd', def: 'Drivers renting through Hertz as an Express Drive partner.' },
+  { id: 'flexdrive', name: 'Flexdrive', parent: 'xd', def: 'Drivers renting through Lyft\'s proprietary Flexdrive program.' },
+  { id: 'xd-program', name: 'XD Program', parent: 'xd', def: 'How Express Drive works structurally — driver qualification, market availability, application, onboarding, vehicle pickup.' },
+  { id: 'xd-pay', name: 'XD Pay', parent: 'xd', def: 'Financial relationship during an active XD rental — rental fees, mileage charges, earnings thresholds, charge disputes.' },
+  { id: 'xd-damage', name: 'XD Damage', parent: 'xd', def: 'Physical damage on an Express Drive vehicle — damage reporting, assessment, driver liability, damage charges.' },
+  { id: 'xd-maintenance', name: 'XD Maintenance', parent: 'xd', def: 'Required upkeep processes for Express Drive vehicles during active rental.' },
+  { id: 'regional-policy', name: 'Regional Policy', parent: null, def: 'Driver requirements and benefits determined by regulations of a specific operating region.' },
+  { id: 'paid-sick-leave', name: 'Paid Sick Leave', parent: 'regional-policy', def: 'Regional programs compensating drivers for time lost due to medical conditions or qualifying leave.' },
+  { id: 'settlement', name: 'Settlement', parent: 'regional-policy', def: 'Legal settlements governing how Lyft operates in specific regions — driver rights, entitlements, obligations.' },
+  { id: 'placard', name: 'Placard', parent: 'regional-policy', def: 'Physical placards, decals, or emblems drivers must display on their vehicle while driving on Lyft.' },
+  { id: 'for-hire-permit', name: 'For-Hire Permit', parent: 'regional-policy', def: 'Permits legally authorizing a driver to transport riders for compensation in a specific region.' },
+  { id: 'courses', name: 'Courses', parent: 'regional-policy', def: 'Region-mandated training courses or educational requirements drivers must complete.' },
+  { id: 'military', name: 'Military', parent: 'regional-policy', def: 'Documents or processes for active military personnel or drivers picking up/dropping off on military bases.' },
+  { id: 'certificate', name: 'Certificate', parent: 'regional-policy', def: 'Regional certificates drivers must obtain and provide to drive on Lyft.' },
+  { id: 'regional-checks', name: 'Regional Checks', parent: 'regional-policy', def: 'Background or driving record checks specific to a region, required before or during driving on Lyft.' },
+  { id: 'driver-info', name: 'Driver Info', parent: 'regional-policy', def: 'Consolidated summary of requirements, entitlements, or policies for drivers in a specific region.' },
+  { id: 'accessibility', name: 'Accessibility', parent: null, def: 'Content covering accessibility accommodations and services.' },
+  { id: 'service-animals', name: 'Service Animals', parent: 'accessibility', def: 'Driver and rider rights and responsibilities around service animals.' },
+  { id: 'mobility-device', name: 'Mobility Device', parent: 'accessibility', def: 'Rides involving wheelchairs, scooters, or other mobility aids.' },
+  { id: 'assisted', name: 'Assisted', parent: 'accessibility', def: 'Drivers providing physical assistance to riders with disabilities during a trip.' },
+  { id: 'safety-tag', name: 'Safety', parent: null, def: 'Safety content — reporting unsafe behavior, emergency tools, safety guidelines.' },
+  { id: 'reporting', name: 'Reporting', parent: 'safety-tag', def: 'Reporting unsafe behavior or directing users to the appropriate reporting flow after an incident.' },
+  { id: 'emergency', name: 'Emergency', parent: 'safety-tag', def: 'Emergency services during a ride — RapidSOS integration, contacting emergency services through the app.' },
+  { id: 'guidelines', name: 'Guidelines', parent: 'safety-tag', def: 'General safety guidelines content.' },
+  { id: 'fleet', name: 'Fleet', parent: null, def: 'Management and operation of a dedicated pool of vehicles owned/leased/administered by an organization.' },
+  { id: 'autonomous', name: 'Autonomous', parent: 'fleet', def: 'Autonomous vehicle fleets — May Mobility, Waymo, and other AV technology partners.' },
+  { id: 'taxi', name: 'Taxi', parent: 'fleet', def: 'Taxi vehicle fleets on the Lyft platform through authorized partnerships including Curb.' },
+  { id: 'livery', name: 'Livery', parent: 'fleet', def: 'Licensed black car, limousine, and chauffeured vehicle service fleets on Lyft.' },
+  { id: 'owner-operator', name: 'Owner Operator', parent: 'livery', def: 'Drivers operating a vehicle registered under a livery fleet — driver-side experience within a fleet structure.' },
+  { id: 'fleet-owner', name: 'Fleet Owner', parent: 'livery', def: 'Person/entity managing a livery fleet — vehicle registration, driver assignment, fleet compliance, operational oversight.' },
+  { id: 'shuttle', name: 'Shuttle', parent: 'fleet', def: 'Shuttle fleet operations (coming soon).' },
+  { id: 'operations', name: 'Operations', parent: null, def: 'Agent-facing content for support associates navigating tooling, managing interactions, concession logic, and escalations.' },
+  { id: 'bugs-sevs', name: 'Bugs/SEVs', parent: 'operations', def: 'Platform behavior not acting as expected — newly identified bugs and actively investigated SEVs.' },
+  { id: 'concessions', name: 'Concessions', parent: 'operations', def: 'User eligibility for a discretionary concession, executing issuance, or understanding concession logic.' },
+  { id: 'ai-assist-ops', name: 'AI Assist (Ops)', parent: 'operations', def: 'Identifying and navigating interactions handled by an AI agent prior to associate involvement.' },
+  { id: 'tooling', name: 'Tooling', parent: 'operations', def: 'Internal support tools — Amazon Connect, Toll Debuggers, Ride Review, Time Machine, Jira.' },
+];
 
 function normalizeEscalRate(rate, views) {
   if (rate == null || isNaN(rate)) return null;
@@ -1923,6 +2055,8 @@ function saveConfig() {
 
   localStorage.setItem('cftAuditConfig', JSON.stringify(updated));
   config = updated;
+  claudeApiKey = id('cfg_claudeApiKey').value.trim();
+  localStorage.setItem('cftClaudeApiKey', claudeApiKey);
   closeConfig();
   updateSpaceButtons();
   resetState();
@@ -1943,6 +2077,7 @@ function openConfig() {
   id('cfg_s2_cpaToken').value = s2.cpaToken;
   id('cfg_s2_cmaToken').value = s2.cmaToken;
   id('cfg_staleDays').value = config.staleDays;
+  id('cfg_claudeApiKey').value = claudeApiKey || '';
   id('cfg_customRules').value = config.customRules && config.customRules.length
     ? JSON.stringify(config.customRules, null, 2) : '';
   id('configModal').style.display = 'flex';
@@ -2160,6 +2295,7 @@ async function loadEntries() {
       fastAuditAll();
       loadAiAssistStatuses();
     }
+    updateTagSidebarCounts();
   } catch(e) {
     setContent(`<div class="empty-state"><div class="empty-icon">⚠️</div><div class="empty-title">Error loading entries</div><div class="empty-desc">${esc(e.message)}</div><button class="btn btn-primary" style="margin-top:12px" onclick="loadData()">Retry</button></div>`);
   }
@@ -2614,14 +2750,40 @@ function renderActiveColFilters() {
       <button onclick="setColumnFilter('aiAssist','')" style="background:none;border:none;cursor:pointer;color:#93c5fd;font-size:12px;line-height:1;padding:0 2px">✕</button>
     </span>`);
   }
+  if (columnFilters.tag) {
+    const tagDef = KM_TAXONOMY.find(t => t.id === columnFilters.tag);
+    chips.push(`<span style="display:inline-flex;align-items:center;gap:4px;background:white;border:1px solid #bfdbfe;border-radius:99px;padding:2px 8px;font-weight:600;color:var(--primary)">
+      Tag: ${esc(tagDef ? tagDef.name : columnFilters.tag)}
+      <button onclick="setColumnFilter('tag','')" style="background:none;border:none;cursor:pointer;color:#93c5fd;font-size:12px;line-height:1;padding:0 2px">✕</button>
+    </span>`);
+  }
   if (chips.length) {
     bar.style.display = 'flex';
     bar.innerHTML = `<span style="color:#1d4ed8;font-weight:700">Filters:</span> ${chips.join('')}
-      <button onclick="columnFilters={contentType:'',audit:'',aiAssist:''};filterEntries()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:#dc2626;font-size:11px;font-weight:700">Clear all ✕</button>`;
+      <button onclick="columnFilters={contentType:'',audit:'',aiAssist:'',tag:''};filterEntries()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:#dc2626;font-size:11px;font-weight:700">Clear all ✕</button>`;
   } else {
     bar.style.display = 'none';
     bar.innerHTML = '';
   }
+}
+
+function getEntryTagIds(entry) {
+  return ((entry.metadata && entry.metadata.tags) || []).map(t => t.sys && t.sys.id).filter(Boolean);
+}
+
+function getEntryTagNames(entry) {
+  return getEntryTagIds(entry).map(tid => {
+    const st = spaceTags.find(s => s.sys.id === tid);
+    return st ? st.name : tid;
+  });
+}
+
+function renderEntryTagChips(entry) {
+  const names = getEntryTagNames(entry);
+  if (!names.length) return `<span style="color:var(--text-muted);font-size:10px;font-style:italic">untagged</span>`;
+  return names.slice(0,3).map(n =>
+    `<span style="display:inline-block;background:#eff6ff;color:#1d4ed8;border-radius:99px;padding:1px 6px;font-size:10px;margin:1px;white-space:nowrap">${esc(n)}</span>`
+  ).join('') + (names.length > 3 ? `<span style="font-size:10px;color:var(--text-muted)"> +${names.length-3}</span>` : '');
 }
 
 function entryMatchesAudience(entry, audience) {
@@ -2707,6 +2869,25 @@ function applyFilters() {
       if (columnFilters.aiAssist === 'na' && isInApp) return false;
     }
 
+    if (columnFilters.tag) {
+      const entryTagIds = getEntryTagIds(entry);
+      if (columnFilters.tag === '__untagged__') {
+        if (entryTagIds.length > 0) return false;
+      } else {
+        const tagDef = KM_TAXONOMY.find(t => t.id === columnFilters.tag);
+        // Match by KM taxonomy id against Contentful tag names/ids
+        const matchesTag = entryTagIds.some(tid => {
+          const spaceTag = spaceTags.find(st => st.sys.id === tid);
+          const tagName = (spaceTag ? spaceTag.name : tid).toLowerCase();
+          const tagId = tid.toLowerCase();
+          const kmName = tagDef ? tagDef.name.toLowerCase() : columnFilters.tag.toLowerCase();
+          const kmId = columnFilters.tag.toLowerCase();
+          return tagName.includes(kmId) || tagId.includes(kmId) || tagName.includes(kmName) || tagId.includes(kmName.replace(/\s+/g,'-'));
+        });
+        if (!matchesTag) return false;
+      }
+    }
+
     return true;
   });
 }
@@ -2783,6 +2964,7 @@ function renderEntryTable() {
         <td>${statusBadge}</td>
         <td><div class="audit-chips">${auditChips}</div></td>
         <td style="white-space:nowrap">${aiBadge}</td>
+        <td style="font-size:11px;max-width:140px">${renderEntryTagChips(entry)}</td>
         <td style="font-size:12px;color:var(--text-muted);white-space:nowrap">${updated}</td>
       </tr>`;
   }
@@ -2816,6 +2998,13 @@ function renderEntryTable() {
             <button class="col-filter-btn${aiActiveClass}" title="Filter by AI Assist"
               onclick="event.stopPropagation();openColFilter('aiAssist',this)">
               ${columnFilters.aiAssist ? '●' : '⌄'}
+            </button>
+          </th>
+          <th>
+            Tags
+            <button class="col-filter-btn${columnFilters.tag ? ' active' : ''}" title="Filter by tag"
+              onclick="event.stopPropagation();openColFilter('tag',this)">
+              ${columnFilters.tag ? '●' : '⌄'}
             </button>
           </th>
           <th>Updated</th>
@@ -2981,6 +3170,39 @@ function openColFilter(col, btnEl) {
       </div>`).join('')}
     </div>
     ${columnFilters.aiAssist ? `<div class="col-filter-clear" onclick="setColumnFilter('aiAssist','')">✕ Clear filter</div>` : ''}`;
+
+  } else if (col === 'tag') {
+    // Count entries per Contentful tag in current filtered set
+    const tagCounts = {};
+    let untaggedCount = 0;
+    for (const e of filteredEntries) {
+      const ids = getEntryTagIds(e);
+      if (!ids.length) { untaggedCount++; continue; }
+      for (const tid of ids) {
+        tagCounts[tid] = (tagCounts[tid] || 0) + 1;
+      }
+    }
+    const sortedTags = Object.entries(tagCounts).sort((a,b) => b[1]-a[1]);
+    html = `<input class="col-filter-search" placeholder="Search tags…" oninput="filterColDropdownSearch(this)" onclick="event.stopPropagation()" autofocus>
+      <div class="col-filter-list">
+        <div class="col-filter-option ${!columnFilters.tag ? 'selected' : ''}" onclick="setColumnFilter('tag','')">
+          <span>All tags</span>
+        </div>
+        <div class="col-filter-option ${columnFilters.tag==='__untagged__'?'selected':''}" onclick="setColumnFilter('tag','__untagged__')">
+          <span style="font-style:italic;color:var(--text-muted)">Untagged</span>
+          <span class="col-filter-option-count">${untaggedCount}</span>
+        </div>
+        ${sortedTags.map(([tid, cnt]) => {
+          const st = spaceTags.find(s => s.sys.id === tid);
+          const name = st ? st.name : tid;
+          const sel = columnFilters.tag === tid ? 'selected' : '';
+          return `<div class="col-filter-option ${sel}" onclick="setColumnFilter('tag','${tid}')">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">${esc(name)}</span>
+            <span class="col-filter-option-count">${cnt}</span>
+          </div>`;
+        }).join('')}
+      </div>
+      ${columnFilters.tag ? `<div class="col-filter-clear" onclick="setColumnFilter('tag','')">✕ Clear filter</div>` : ''}`;
   }
 
   panel.innerHTML = html;
@@ -3047,6 +3269,7 @@ function switchTab(tab) {
 function renderTab() {
   if (currentTab === 'guide') { renderGuideTab(); return; }
   if (currentTab === 'aiassist') { renderAiAssistTab(); return; }
+  if (currentTab === 'tags') { renderTagsTab(); return; }
   if (!detailPublished) return;
   if (currentTab === 'comparison') renderComparisonTab();
   else if (currentTab === 'audit') renderAuditTab();
@@ -4998,6 +5221,11 @@ function showOverview() {
   const audited = ownedEntries.filter(e => auditResults[e.sys.id]).length;
   const healthPct = audited ? Math.round((okCount / audited) * 100) : null;
 
+  // Tag coverage
+  const taggedCount = ownedEntries.filter(e => getEntryTagIds(e).length > 0).length;
+  const untaggedCount = total - taggedCount;
+  const tagPct = total ? Math.round((taggedCount / total) * 100) : 0;
+
   // AI Assist coverage (from entries we've already checked)
   const aiChecked = Object.keys(aiAssistEnabled).length;
   const aiEnabled = Object.values(aiAssistEnabled).filter(v => v === true).length;
@@ -5054,11 +5282,23 @@ function showOverview() {
     <div style="font-size:18px;font-weight:800;color:var(--text);margin-bottom:4px">Content Governance Overview</div>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:20px">${total.toLocaleString()} entries across ${contentTypes.length} content types · Space: ${config.spaces[currentSpaceIdx].name}</div>
 
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
       ${statCard('Total entries', total.toLocaleString())}
       ${statCard('Stale content', staleCount.toLocaleString(), `>${staleDays} days without update`, staleCount > 0 ? '#d97706' : 'var(--text)', staleCount > 0 ? "applyQuickFilter('outdated')" : '')}
       ${statCard('Audit errors', errCount.toLocaleString(), `${audited.toLocaleString()} entries audited`, errCount > 0 ? '#dc2626' : 'var(--text)', errCount > 0 ? "showAuditDashboard('errors')" : '')}
       ${healthPct !== null ? statCard('Audit health', healthPct + '%', `${okCount} of ${audited} audited entries passing`, healthPct >= 80 ? '#16a34a' : healthPct >= 50 ? '#d97706' : '#dc2626', okCount > 0 ? "showAuditDashboard('ok')" : '') : statCard('Audit health', '—', 'Run audit to see score')}
+    </div>
+
+    <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:8px;display:flex;align-items:center;gap:8px">
+      Tag Coverage
+      <button onclick="showTagLibrary()" style="font-size:11px;background:none;border:1px solid var(--border);border-radius:99px;padding:2px 8px;cursor:pointer;color:var(--primary);font-weight:600">View Tag Library →</button>
+      <button onclick="exportGovernanceReport()" style="font-size:11px;background:none;border:1px solid var(--border);border-radius:99px;padding:2px 8px;cursor:pointer;color:var(--text-muted);font-weight:600">↓ Export Report</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">
+      ${statCard('Tag coverage', tagPct + '%', `${taggedCount.toLocaleString()} of ${total.toLocaleString()} entries tagged`, tagPct >= 80 ? '#16a34a' : tagPct >= 50 ? '#d97706' : '#dc2626')}
+      ${statCard('Untagged entries', untaggedCount.toLocaleString(), 'Missing all taxonomy tags', untaggedCount > 0 ? '#d97706' : '#16a34a', untaggedCount > 0 ? "columnFilters.tag='__untagged__';filterEntries();document.querySelectorAll('.sidebar-item').forEach(el=>el.classList.remove('active'));" : '')}
+      ${statCard('Unique tags in use', [...new Set(ownedEntries.flatMap(e => getEntryTagIds(e)))].length.toLocaleString(), 'distinct Contentful tags applied')}
+      ${statCard('Tag Library', KM_TAXONOMY.length + ' tags', 'KM taxonomy definitions', 'var(--primary)', 'showTagLibrary()')}
     </div>
 
     ${(() => {
@@ -5114,6 +5354,86 @@ function showOverview() {
         </div>
       </div>
     </div>
+  </div>`);
+}
+
+function showTagLibrary(searchQuery) {
+  closeDetail();
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+  const sidebarEl = document.getElementById('sidebarTagLibrary');
+  if (sidebarEl) sidebarEl.classList.add('active');
+
+  const q = (searchQuery || '').toLowerCase();
+
+  // Group taxonomy by parent
+  const parents = KM_TAXONOMY.filter(t => !t.parent);
+  const childrenOf = id => KM_TAXONOMY.filter(t => t.parent === id);
+
+  // Tag coverage stats from loaded entries
+  const tagUsageCounts = {};
+  for (const e of allEntries) {
+    for (const tid of getEntryTagIds(e)) {
+      tagUsageCounts[tid] = (tagUsageCounts[tid] || 0) + 1;
+    }
+  }
+
+  const taggedTotal = allEntries.filter(e => getEntryTagIds(e).length > 0).length;
+  const tagPct = allEntries.length ? Math.round((taggedTotal / allEntries.length) * 100) : 0;
+
+  const renderTag = (t, indent) => {
+    if (q && !t.name.toLowerCase().includes(q) && !t.def.toLowerCase().includes(q)) return '';
+    const usageCount = Object.entries(tagUsageCounts).reduce((sum, [tid, cnt]) => {
+      const st = spaceTags.find(s => s.sys.id === tid);
+      const name = st ? st.name.toLowerCase() : tid.toLowerCase();
+      const matches = name.includes(t.id.toLowerCase()) || name.includes(t.name.toLowerCase()) || tid.toLowerCase().includes(t.id.toLowerCase());
+      return sum + (matches ? cnt : 0);
+    }, 0);
+    const usageBadge = usageCount > 0
+      ? `<span style="background:#dcfce7;color:#16a34a;border-radius:99px;padding:1px 7px;font-size:10px;font-weight:700;margin-left:6px">${usageCount} entries</span>`
+      : `<span style="background:#fef9c3;color:#92400e;border-radius:99px;padding:1px 7px;font-size:10px;font-weight:600;margin-left:6px">not used</span>`;
+    const lobBadge = t.lob ? `<span style="background:#eff6ff;color:#1d4ed8;border-radius:99px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:4px">LOB</span>` : '';
+    const children = childrenOf(t.id);
+    return `
+      <div style="margin-bottom:${indent ? 6 : 12}px;padding-left:${indent * 16}px">
+        <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:3px">
+          <span style="font-weight:${indent ? '600' : '700'};font-size:${indent ? '12' : '13'}px;color:var(--text)">${esc(t.name)}</span>
+          ${lobBadge}
+          ${usageBadge}
+          <code style="font-size:10px;color:var(--text-muted);background:var(--surface-2,#f1f5f9);padding:1px 5px;border-radius:4px">${t.id}</code>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);line-height:1.5;max-width:640px">${esc(t.def)}</div>
+        ${children.map(c => renderTag(c, (indent||0)+1)).join('')}
+      </div>`;
+  };
+
+  const categoryGroups = parents.map(p => {
+    const rendered = renderTag(p, 0);
+    return rendered ? `
+      <div style="background:var(--surface,white);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px">
+        ${rendered}
+      </div>` : '';
+  }).join('');
+
+  const noResults = !categoryGroups.replace(/<[^>]*>/g,'').trim() && q;
+
+  setContent(`<div style="padding:20px 24px;max-width:900px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+      <div style="font-size:18px;font-weight:800;color:var(--text)">Tag Library</div>
+      <button onclick="showTagLibrary()" style="font-size:11px;background:none;border:1px solid var(--border);border-radius:99px;padding:2px 8px;cursor:pointer;color:var(--text-muted)">↺ Refresh</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">
+      SCC KM Taxonomy — ${KM_TAXONOMY.length} tags · ${tagPct}% of ${allEntries.length.toLocaleString()} entries tagged
+    </div>
+
+    <input type="text" placeholder="Search tags by name or definition…"
+      value="${esc(searchQuery||'')}"
+      oninput="showTagLibrary(this.value)"
+      style="width:100%;max-width:500px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;margin-bottom:16px;box-sizing:border-box;background:var(--surface,white);color:var(--text)">
+
+    ${noResults
+      ? `<div style="color:var(--text-muted);font-size:13px;padding:24px 0">No tags match "${esc(q)}"</div>`
+      : categoryGroups
+    }
   </div>`);
 }
 
@@ -5455,6 +5775,688 @@ function init() {
   loadHexMetricsFromStorage();
   updateSpaceButtons();
   loadData();
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// AI TAGGING WORKFLOW
+// ──────────────────────────────────────────────────────────────────────
+
+function updateTagSidebarCounts() {
+  const pending = Object.values(tagStates).filter(s => s.status === 'pending').length;
+  const flagged = Object.values(tagStates).filter(s => s.status === 'flagged' || (s.flags && s.flags.some(f => !f.resolved))).length;
+  const qEl = id('approvalQueueCount');
+  const fEl = id('flaggedCount');
+  if (qEl) { qEl.textContent = pending; qEl.style.display = pending > 0 ? '' : 'none'; }
+  if (fEl) { fEl.textContent = flagged; fEl.style.display = flagged > 0 ? '' : 'none'; }
+}
+
+function getTagState(entryId, entry) {
+  if (!tagStates[entryId]) {
+    tagStates[entryId] = {
+      status: 'untagged',
+      pendingTags: [],
+      suggestions: [],
+      history: [],
+      flags: [],
+      submittedBy: null, submittedAt: null,
+      approvedBy: null, approvedAt: null,
+      lastSyncedAt: null, syncError: null,
+      entryTitle: entry ? getEntryTitle(entry) : entryId,
+      contentType: entry ? (contentTypes.find(c => c.sys.id === entry.sys.contentType.sys.id)?.name || '') : ''
+    };
+  }
+  return tagStates[entryId];
+}
+
+function saveTagStates() {
+  localStorage.setItem('cftTagStates', JSON.stringify(tagStates));
+  updateTagSidebarCounts();
+}
+
+function logTagHistory(entryId, action, tags, options = {}) {
+  const state = tagStates[entryId];
+  if (!state) return;
+  state.history.push({
+    timestamp: new Date().toISOString(),
+    action,
+    tags: Array.isArray(tags) ? tags : [tags],
+    note: options.note || '',
+    aiSuggested: options.aiSuggested || false,
+    syncStatus: options.syncStatus || null
+  });
+  saveTagStates();
+}
+
+function renderTagsTab() {
+  const tc = id('tabContent');
+  if (!tc || !selectedEntryId) return;
+  const entry = allEntries.find(e => e.sys.id === selectedEntryId);
+  if (!entry) return;
+
+  const state = getTagState(selectedEntryId, entry);
+  const currentTags = getEntryTagNames(entry);
+  const hasCmaToken = !!getCmaToken();
+  const hasApiKey = !!claudeApiKey;
+
+  const statusColors = { untagged:'#6b7280', suggested:'#2563eb', pending:'#d97706', approved:'#16a34a', flagged:'#dc2626' };
+  const statusLabels = { untagged:'Untagged', suggested:'AI Suggested', pending:'Pending Approval', approved:'Approved', flagged:'Flagged' };
+  const statusBadge = `<span style="background:${statusColors[state.status]}22;color:${statusColors[state.status]};border-radius:99px;padding:3px 10px;font-size:11px;font-weight:700">${statusLabels[state.status] || state.status}</span>`;
+
+  const currentTagsHtml = currentTags.length
+    ? currentTags.map(n => `<span style="background:#eff6ff;color:#1d4ed8;border-radius:99px;padding:2px 10px;font-size:12px;font-weight:600">${esc(n)}</span>`).join(' ')
+    : `<span style="color:var(--text-muted);font-style:italic;font-size:12px">No tags in Contentful yet</span>`;
+
+  const accepted = (state.pendingTags || []).filter(t => t.state === 'accepted');
+  const acceptedHtml = accepted.length ? accepted.map(t => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;margin-bottom:4px">
+      <div>
+        <span style="font-weight:600;font-size:12px;color:#15803d">${esc(t.tagName)}</span>
+        ${t.source === 'ai' ? `<span style="font-size:10px;color:#6b7280;margin-left:6px">AI suggested · ${Math.round((t.confidence||0)*100)}% confidence</span>` : `<span style="font-size:10px;color:#6b7280;margin-left:6px">Manual</span>`}
+        ${t.rationale ? `<div style="font-size:11px;color:#4b5563;margin-top:2px">${esc(t.rationale)}</div>` : ''}
+      </div>
+      <button onclick="removeAcceptedTag('${selectedEntryId}','${t.tagId}')" style="background:none;border:none;cursor:pointer;color:#dc2626;font-size:14px;padding:0 4px" title="Remove">✕</button>
+    </div>`).join('') : '';
+
+  const pendingSuggestions = (state.suggestions || []).filter(s => !(state.pendingTags||[]).find(t => t.tagId === s.tagId));
+  const suggestionsHtml = pendingSuggestions.length ? pendingSuggestions.map(s => {
+    const pct = Math.round((s.confidence || 0) * 100);
+    const barColor = pct >= 80 ? '#16a34a' : pct >= 60 ? '#d97706' : '#6b7280';
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+        <span style="font-weight:700;font-size:13px">${esc(s.tagName)}</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <div style="width:60px;height:6px;background:#e5e7eb;border-radius:99px;overflow:hidden">
+            <div style="width:${pct}%;height:100%;background:${barColor};border-radius:99px"></div>
+          </div>
+          <span style="font-size:11px;color:${barColor};font-weight:700">${pct}%</span>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;line-height:1.5">${esc(s.rationale || '')}</div>
+      <div style="display:flex;gap:6px">
+        <button onclick="acceptSuggestion('${selectedEntryId}','${s.tagId}')" style="background:#dcfce7;color:#15803d;border:none;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">✓ Accept</button>
+        <button onclick="rejectSuggestion('${selectedEntryId}','${s.tagId}')" style="background:#fee2e2;color:#b91c1c;border:none;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:700;cursor:pointer">✕ Reject</button>
+      </div>
+    </div>`;
+  }).join('') : '';
+
+  const manualAddHtml = `
+    <div style="display:flex;gap:6px;margin-bottom:4px">
+      <select id="manualTagSelect" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:var(--surface,white);color:var(--text)">
+        <option value="">— Select a tag to add manually —</option>
+        ${KM_TAXONOMY.map(t => `<option value="${t.id}">${t.parent ? '  ↳ ' : ''}${esc(t.name)} (${t.id})</option>`).join('')}
+      </select>
+      <button onclick="addManualTag('${selectedEntryId}')" style="background:var(--primary);color:white;border:none;border-radius:6px;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap">+ Add</button>
+    </div>`;
+
+  const historyHtml = (state.history || []).slice().reverse().slice(0,10).map(h => {
+    const t = new Date(h.timestamp).toLocaleString();
+    const tagList = (h.tags || []).join(', ');
+    return `<div style="display:grid;grid-template-columns:130px 1fr;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">
+      <div style="color:var(--text-muted)">${t}</div>
+      <div><span style="font-weight:600;color:var(--text)">${esc(h.action)}</span>${tagList ? `: ${esc(tagList)}` : ''}${h.note ? ` — ${esc(h.note)}` : ''}${h.syncStatus ? ` <span style="color:#16a34a">(${esc(h.syncStatus)})</span>` : ''}</div>
+    </div>`;
+  }).join('') || `<div style="color:var(--text-muted);font-size:11px;padding:8px 0">No history yet.</div>`;
+
+  const flagsHtml = (state.flags || []).filter(f => !f.resolved).map((f, i) => `
+    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:start">
+        <div>
+          <span style="font-weight:700;font-size:12px;color:#dc2626">⚠ ${esc(f.type)}</span>
+          <div style="font-size:11px;color:#374151;margin-top:3px">${esc(f.description)}</div>
+          ${f.recommendedAction ? `<div style="font-size:11px;color:#6b7280;margin-top:2px">Recommended: ${esc(f.recommendedAction)}</div>` : ''}
+        </div>
+        <button onclick="resolveFlag('${selectedEntryId}',${i})" style="background:none;border:1px solid #fecaca;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;color:#dc2626;white-space:nowrap">Resolve</button>
+      </div>
+    </div>`).join('');
+
+  let actionBar = '';
+  if (state.status === 'pending') {
+    actionBar = `<div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div style="font-size:12px;color:#92400e;font-weight:600">⏳ Pending approval — submitted ${state.submittedAt ? new Date(state.submittedAt).toLocaleDateString() : ''}</div>
+      <div style="display:flex;gap:6px">
+        ${hasCmaToken ? `<button onclick="approveTagSet('${selectedEntryId}')" style="background:#16a34a;color:white;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer">✓ Approve & Sync</button>` : ''}
+        <button onclick="requestRevision('${selectedEntryId}')" style="background:none;border:1px solid #d97706;color:#d97706;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">↩ Request Revision</button>
+      </div>
+    </div>`;
+  } else if (state.status === 'approved') {
+    actionBar = `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#15803d;font-weight:600">✓ Tags approved and synced to Contentful ${state.lastSyncedAt ? '· ' + new Date(state.lastSyncedAt).toLocaleString() : ''}</div>`;
+  } else if (accepted.length > 0) {
+    actionBar = `<div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+      <button onclick="submitForApproval('${selectedEntryId}')" style="background:#1d4ed8;color:white;border:none;border-radius:6px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer">Submit for Approval →</button>
+    </div>`;
+  }
+
+  tc.innerHTML = `<div style="padding:16px;overflow-y:auto;height:100%">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:800;color:var(--text)">Tag Management</div>
+      ${statusBadge}
+    </div>
+
+    ${state.syncError ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#dc2626">⚠ Last sync failed: ${esc(state.syncError)} — Check your CMA token and try approving again.</div>` : ''}
+
+    ${actionBar}
+
+    ${flagsHtml ? `<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Inconsistency Flags</div>${flagsHtml}</div>` : ''}
+
+    <div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Current Contentful Tags</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${currentTagsHtml}</div>
+    </div>
+
+    ${acceptedHtml ? `<div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Accepted Tags <span style="font-weight:400;color:var(--text-muted)">(ready to submit)</span></div>
+      ${acceptedHtml}
+    </div>` : ''}
+
+    <div style="margin-bottom:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:12px;font-weight:700;color:var(--text)">AI Tag Suggestions</div>
+        <div style="display:flex;gap:6px">
+          ${hasApiKey ? `<button id="aiSuggestBtn" onclick="generateTagSuggestions('${selectedEntryId}')" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:white;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer">✦ ${state.suggestions && state.suggestions.length ? 'Re-suggest' : 'Suggest Tags'}</button>` : ''}
+          <button onclick="copyTagPrompt('${selectedEntryId}')" style="background:none;border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text)" title="Copy prompt to paste into Claude.ai">⧉ Copy Prompt</button>
+        </div>
+      </div>
+      ${!hasApiKey ? `
+        <div style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;font-size:12px;color:var(--text-muted)">
+          <div style="margin-bottom:8px">1. Click <strong>⧉ Copy Prompt</strong> above → paste into <strong>claude.ai</strong> → copy Claude's response</div>
+          <div style="margin-bottom:6px">2. Paste Claude's response here:</div>
+          <textarea id="pasteResponseArea" placeholder='[{"tagId":"driver","tagName":"Driver","rationale":"...","confidence":0.9}]' style="width:100%;height:80px;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:11px;font-family:monospace;resize:vertical;box-sizing:border-box;background:white;color:#111"></textarea>
+          <button onclick="parsePastedSuggestions('${selectedEntryId}')" style="background:#1d4ed8;color:white;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer;margin-top:6px">Apply Suggestions</button>
+        </div>` : ''}
+      ${suggestionsHtml || (state.suggestions && state.suggestions.length === 0 && state.status !== 'untagged' ? `<div style="color:var(--text-muted);font-size:12px;padding:4px 0">No new suggestions — all tags have been reviewed.</div>` : (!hasApiKey ? '' : `<div style="color:var(--text-muted);font-size:12px;padding:4px 0">Click "Suggest Tags" to have Claude analyze this entry and recommend tags.</div>`))
+      }
+    </div>
+
+    <div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Add Tag Manually</div>
+      ${manualAddHtml}
+    </div>
+
+    <div>
+      <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px">Version History</div>
+      ${historyHtml}
+    </div>
+  </div>`;
+}
+
+function buildTagPrompt(entryId) {
+  const entry = allEntries.find(e => e.sys.id === entryId);
+  const state = getTagState(entryId, entry);
+  const pub = publishedEntries[entryId];
+  const draft = previewEntries[entryId];
+  const source = draft || pub;
+  const title = getEntryTitle(entry);
+  const ctName = state.contentType;
+  let contentExcerpt = '';
+  if (source && source.fields) {
+    for (const [fk, fv] of Object.entries(source.fields)) {
+      const val = fv && typeof fv === 'object' ? (fv['en-US'] || Object.values(fv)[0]) : fv;
+      if (typeof val === 'string' && val.length > 0) {
+        contentExcerpt += `${fk}: ${val.slice(0, 300)}\n`;
+        if (contentExcerpt.length > 1500) break;
+      }
+    }
+  }
+  const taxonomyRef = KM_TAXONOMY.map(t => `- ${t.id} (${t.name}${t.parent ? ', child of ' + t.parent : ''}): ${t.def.slice(0, 150)}`).join('\n');
+  return `You are a content taxonomy expert for Lyft's support knowledge base. Analyze this Contentful entry and suggest the most appropriate tags from the KM taxonomy.\n\nENTRY:\nTitle: ${title}\nContent Type: ${ctName}\nContent excerpt:\n${contentExcerpt || '(no content fields available)'}\n\nKM TAXONOMY (id: name — definition):\n${taxonomyRef}\n\nReturn a JSON array of tag suggestions (max 5, most relevant first):\n[{"tagId": "tag-id", "tagName": "Tag Name", "rationale": "Why this tag applies (1-2 sentences)", "confidence": 0.0-1.0}]\n\nOnly suggest tags that clearly match the entry content based on the definitions. Return raw JSON only, no markdown.`;
+}
+
+function copyTagPrompt(entryId) {
+  const prompt = buildTagPrompt(entryId);
+  const tc = id('tabContent');
+  if (!tc) return;
+
+  // Show prompt inline in the tab panel — no overlay/z-index issues
+  const prevHtml = tc.innerHTML;
+  tc.innerHTML = `
+    <div style="padding:16px;display:flex;flex-direction:column;height:100%;box-sizing:border-box">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-shrink:0">
+        <div>
+          <div style="font-weight:800;font-size:14px;color:var(--text)">Prompt for Claude.ai</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Select all → Cmd+C → paste at <strong>claude.ai</strong> → paste Claude's response back in the Tags tab</div>
+        </div>
+        <button onclick="switchTab('tags')" style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;color:var(--text)">← Back to Tags</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px;flex-shrink:0">
+        <button id="inlineSelectAllBtn" style="background:#1d4ed8;color:white;border:none;border-radius:6px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer">Select All</button>
+        <span style="font-size:11px;color:var(--text-muted);align-self:center">Then Cmd+C (Mac) / Ctrl+C (Windows)</span>
+      </div>
+      <textarea id="inlinePromptTA" readonly style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:11px;font-family:monospace;line-height:1.5;resize:none;color:#111;background:#f9fafb;min-height:0"></textarea>
+    </div>`;
+
+  const ta = id('inlinePromptTA');
+  ta.value = prompt;
+  id('inlineSelectAllBtn').onclick = () => { ta.focus(); ta.select(); };
+}
+
+function parsePastedSuggestions(entryId) {
+  const ta = id('pasteResponseArea');
+  if (!ta || !ta.value.trim()) { showToast('Paste Claude\'s JSON response first'); return; }
+  try {
+    const text = ta.value.trim();
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('No JSON array found — make sure you copied the full response');
+    const suggestions = JSON.parse(jsonMatch[0]);
+    if (!Array.isArray(suggestions) || !suggestions.length) throw new Error('Empty or invalid suggestions array');
+    const entry = allEntries.find(e => e.sys.id === entryId);
+    const state = getTagState(entryId, entry);
+    state.suggestions = suggestions;
+    if (state.status === 'untagged') state.status = 'suggested';
+    logTagHistory(entryId, 'AI suggestions applied (via claude.ai)', suggestions.map(s => s.tagName), { aiSuggested: true });
+    detectTagInconsistencies(entryId, entry);
+    renderTagsTab();
+    showToast(`✦ ${suggestions.length} tag suggestions applied`);
+  } catch(e) {
+    showToast('Parse error: ' + e.message);
+  }
+}
+
+async function generateTagSuggestions(entryId) {
+  const btn = id('aiSuggestBtn');
+  if (btn) { btn.textContent = '⟳ Analyzing…'; btn.disabled = true; }
+
+  const entry = allEntries.find(e => e.sys.id === entryId);
+  const state = getTagState(entryId, entry);
+
+  const pub = publishedEntries[entryId];
+  const draft = previewEntries[entryId];
+  const source = draft || pub;
+  const title = getEntryTitle(entry);
+  const ctName = state.contentType;
+
+  let contentExcerpt = '';
+  if (source && source.fields) {
+    for (const [fk, fv] of Object.entries(source.fields)) {
+      const val = fv && typeof fv === 'object' ? (fv['en-US'] || Object.values(fv)[0]) : fv;
+      if (typeof val === 'string' && val.length > 0) {
+        contentExcerpt += `${fk}: ${val.slice(0, 300)}\n`;
+        if (contentExcerpt.length > 1500) break;
+      }
+    }
+  }
+
+  const taxonomyRef = KM_TAXONOMY.map(t => `- ${t.id} (${t.name}${t.parent ? ', child of ' + t.parent : ''}): ${t.def.slice(0, 150)}`).join('\n');
+
+  const prompt = `You are a content taxonomy expert for Lyft's support knowledge base. Analyze this Contentful entry and suggest the most appropriate tags from the KM taxonomy.
+
+ENTRY:
+Title: ${title}
+Content Type: ${ctName}
+Content excerpt:
+${contentExcerpt || '(no content fields available)'}
+
+KM TAXONOMY (id: name — definition):
+${taxonomyRef}
+
+Return a JSON array of tag suggestions (max 5, most relevant first):
+[{"tagId": "tag-id", "tagName": "Tag Name", "rationale": "Why this tag applies (1-2 sentences)", "confidence": 0.0-1.0}]
+
+Only suggest tags that clearly match the entry content based on the definitions. Return raw JSON only, no markdown.`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': claudeApiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || `API error ${res.status}`);
+    }
+
+    const data = await res.json();
+    const text = data.content[0].text.trim();
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('Invalid response format from AI');
+    const suggestions = JSON.parse(jsonMatch[0]);
+
+    state.suggestions = suggestions;
+    if (state.status === 'untagged') state.status = 'suggested';
+    logTagHistory(entryId, 'AI suggestions generated', suggestions.map(s => s.tagName), { aiSuggested: true });
+
+    detectTagInconsistencies(entryId, entry);
+
+    renderTagsTab();
+    showToast(`✦ ${suggestions.length} tag suggestions generated`);
+  } catch (e) {
+    if (btn) { btn.textContent = '✦ Suggest Tags'; btn.disabled = false; }
+    const tc = id('tabContent');
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;margin:8px 16px;font-size:12px;color:#dc2626';
+    errDiv.textContent = 'AI suggestion failed: ' + e.message;
+    tc?.prepend(errDiv);
+    setTimeout(() => errDiv.remove(), 6000);
+  }
+}
+
+function acceptSuggestion(entryId, tagId) {
+  const state = getTagState(entryId);
+  const suggestion = (state.suggestions || []).find(s => s.tagId === tagId);
+  if (!suggestion) return;
+  if (!(state.pendingTags || (state.pendingTags = [])).find(t => t.tagId === tagId)) {
+    state.pendingTags.push({
+      tagId: suggestion.tagId,
+      tagName: suggestion.tagName,
+      source: 'ai',
+      rationale: suggestion.rationale,
+      confidence: suggestion.confidence,
+      state: 'accepted'
+    });
+  }
+  if (state.status === 'suggested' || state.status === 'untagged') state.status = 'suggested';
+  logTagHistory(entryId, 'Tag accepted', [suggestion.tagName], { aiSuggested: true });
+  renderTagsTab();
+}
+
+function rejectSuggestion(entryId, tagId) {
+  const state = getTagState(entryId);
+  state.suggestions = (state.suggestions || []).filter(s => s.tagId !== tagId);
+  const tag = KM_TAXONOMY.find(t => t.id === tagId);
+  logTagHistory(entryId, 'Tag rejected', [tag ? tag.name : tagId], { aiSuggested: true });
+  saveTagStates();
+  renderTagsTab();
+}
+
+function removeAcceptedTag(entryId, tagId) {
+  const state = getTagState(entryId);
+  const tag = (state.pendingTags || []).find(t => t.tagId === tagId);
+  state.pendingTags = (state.pendingTags || []).filter(t => t.tagId !== tagId);
+  logTagHistory(entryId, 'Tag removed from pending', [tag ? tag.tagName : tagId]);
+  if (!(state.pendingTags || []).length && state.status === 'suggested') state.status = 'untagged';
+  renderTagsTab();
+}
+
+function addManualTag(entryId) {
+  const sel = id('manualTagSelect');
+  if (!sel || !sel.value) return;
+  const tagDef = KM_TAXONOMY.find(t => t.id === sel.value);
+  if (!tagDef) return;
+  const state = getTagState(entryId);
+  if (!(state.pendingTags || []).find(t => t.tagId === tagDef.id)) {
+    if (!state.pendingTags) state.pendingTags = [];
+    state.pendingTags.push({ tagId: tagDef.id, tagName: tagDef.name, source: 'manual', rationale: '', confidence: 1, state: 'accepted' });
+    logTagHistory(entryId, 'Tag added manually', [tagDef.name]);
+    if (state.status === 'untagged') state.status = 'suggested';
+  }
+  sel.value = '';
+  renderTagsTab();
+}
+
+function submitForApproval(entryId) {
+  const state = getTagState(entryId);
+  state.status = 'pending';
+  state.submittedAt = new Date().toISOString();
+  state.submittedBy = 'Writer';
+  logTagHistory(entryId, 'Submitted for approval', (state.pendingTags || []).map(t => t.tagName));
+  saveTagStates();
+  renderTagsTab();
+  updateTagSidebarCounts();
+  showToast('Submitted for approval');
+}
+
+async function approveTagSet(entryId) {
+  const state = getTagState(entryId);
+  if (!state || !state.pendingTags || !state.pendingTags.length) return;
+
+  const btn = event && event.target;
+  if (btn) { btn.textContent = 'Syncing…'; btn.disabled = true; }
+
+  try {
+    const token = getCmaToken();
+    if (!token) throw new Error('CMA token required. Add it in Settings.');
+
+    const sp = spaceConfig();
+    const cmaRes = await fetch(`https://api.contentful.com/spaces/${sp.spaceId}/environments/master/entries/${entryId}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!cmaRes.ok) throw new Error(`CMA fetch failed: ${cmaRes.status}`);
+    const cmaEntry = await cmaRes.json();
+    const version = cmaEntry.sys.version;
+
+    const existingTagIds = ((cmaEntry.metadata && cmaEntry.metadata.tags) || []).map(t => t.sys.id);
+    const newTagIds = (state.pendingTags || []).map(t => t.tagId);
+    const allTagIds = [...new Set([...existingTagIds, ...newTagIds])];
+    const tagLinks = allTagIds.map(tid => ({ sys: { type: 'Link', linkType: 'Tag', id: tid } }));
+
+    const patchRes = await fetch(`https://api.contentful.com/spaces/${sp.spaceId}/environments/master/entries/${entryId}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/merge-patch+json',
+        'X-Contentful-Version': String(version)
+      },
+      body: JSON.stringify({ metadata: { tags: tagLinks } })
+    });
+
+    if (!patchRes.ok) {
+      const errBody = await patchRes.json();
+      throw new Error(errBody.message || `Sync failed: ${patchRes.status}`);
+    }
+
+    state.status = 'approved';
+    state.approvedAt = new Date().toISOString();
+    state.approvedBy = 'Approver';
+    state.lastSyncedAt = new Date().toISOString();
+    state.syncError = null;
+    logTagHistory(entryId, 'Tags approved and synced to Contentful', (state.pendingTags || []).map(t => t.tagName), { syncStatus: 'synced' });
+    state.pendingTags = [];
+
+    saveTagStates();
+    await loadData();
+    renderTagsTab();
+    showToast('✓ Tags synced to Contentful');
+  } catch (e) {
+    state.syncError = e.message;
+    logTagHistory(entryId, 'Sync failed', [], { note: e.message });
+    saveTagStates();
+    if (btn) { btn.textContent = '✓ Approve & Sync'; btn.disabled = false; }
+    renderTagsTab();
+    showToast('Sync failed: ' + e.message);
+  }
+}
+
+function requestRevision(entryId) {
+  const note = prompt('Reason for revision request (optional):') || '';
+  const state = getTagState(entryId);
+  state.status = 'suggested';
+  state.submittedBy = null;
+  state.submittedAt = null;
+  logTagHistory(entryId, 'Revision requested', [], { note });
+  saveTagStates();
+  renderTagsTab();
+  showToast('Revision requested');
+}
+
+function resolveFlag(entryId, flagIndex) {
+  const state = getTagState(entryId);
+  if (state.flags && state.flags[flagIndex]) {
+    state.flags[flagIndex].resolved = true;
+    logTagHistory(entryId, 'Flag resolved', [], { note: state.flags[flagIndex].type });
+    saveTagStates();
+    renderTagsTab();
+  }
+}
+
+function detectTagInconsistencies(entryId, entry) {
+  const state = tagStates[entryId];
+  if (!state) return;
+
+  const allSuggested = (state.pendingTags || []).map(t => t.tagId);
+  const currentTagIds = getEntryTagIds(entry);
+  const combined = [...new Set([...currentTagIds, ...allSuggested])];
+  const flags = [];
+
+  const lobTags = combined.filter(tid => KM_TAXONOMY.find(t => t.id === tid && t.lob));
+  if (lobTags.length > 1) {
+    flags.push({ type: 'Conflicting LOB tags', description: `Multiple Lines of Business applied: ${lobTags.join(', ')}. Only one LOB tag should be used per entry.`, tags: lobTags, recommendedAction: 'Remove all but one LOB tag.', resolved: false });
+  }
+
+  const seen = new Set(), dupes = [];
+  for (const tid of combined) { if (seen.has(tid)) dupes.push(tid); seen.add(tid); }
+  if (dupes.length) {
+    flags.push({ type: 'Duplicate tags', description: `Tags applied more than once: ${dupes.join(', ')}`, tags: dupes, recommendedAction: 'Remove duplicate tag applications.', resolved: false });
+  }
+
+  state.flags = [...(state.flags || []).filter(f => f.resolved), ...flags];
+  if (flags.length && state.status !== 'pending' && state.status !== 'approved') state.status = 'flagged';
+  saveTagStates();
+}
+
+function showApprovalQueue() {
+  closeDetail();
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+  id('sidebarApprovalQueue')?.classList.add('active');
+
+  const pending = Object.entries(tagStates).filter(([, s]) => s.status === 'pending');
+
+  if (!pending.length) {
+    setContent(`<div class="empty-state"><div class="empty-icon">✅</div><div class="empty-title">No pending approvals</div><div class="empty-desc">Entries submitted for review will appear here.</div></div>`);
+    return;
+  }
+
+  const rows = pending.map(([entryId, state]) => {
+    const title = state.entryTitle || entryId;
+    const ct = state.contentType || '';
+    const tags = (state.pendingTags || []).map(t => `<span style="background:#eff6ff;color:#1d4ed8;border-radius:99px;padding:1px 8px;font-size:11px">${esc(t.tagName)}</span>`).join(' ');
+    const submitted = state.submittedAt ? new Date(state.submittedAt).toLocaleDateString() : '';
+    return `<div style="background:var(--surface,white);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px">
+        <div>
+          <div style="font-weight:700;font-size:13px;color:var(--text);cursor:pointer" onclick="selectEntry('${entryId}');switchTab('tags')">${esc(title)}</div>
+          <div style="font-size:11px;color:var(--text-muted)">${esc(ct)} · Submitted ${submitted}</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button onclick="approveTagSet('${entryId}')" style="background:#16a34a;color:white;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer">✓ Approve</button>
+          <button onclick="requestRevision('${entryId}');showApprovalQueue()" style="background:none;border:1px solid #d97706;color:#d97706;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer">↩ Revise</button>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${tags}</div>
+      ${(state.pendingTags || []).some(t => t.source === 'ai' && t.rationale) ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted);font-style:italic">${esc((state.pendingTags.find(t => t.rationale) || {}).rationale || '')}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  setContent(`<div style="padding:20px 24px;max-width:800px">
+    <div style="font-size:18px;font-weight:800;color:var(--text);margin-bottom:4px">Approval Queue</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:20px">${pending.length} entr${pending.length === 1 ? 'y' : 'ies'} pending approval</div>
+    ${rows}
+  </div>`);
+}
+
+function showFlaggedEntries() {
+  closeDetail();
+  document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+  id('sidebarFlagged')?.classList.add('active');
+
+  const flagged = Object.entries(tagStates).filter(([, s]) => s.flags && s.flags.some(f => !f.resolved));
+
+  if (!flagged.length) {
+    setContent(`<div class="empty-state"><div class="empty-icon">⚑</div><div class="empty-title">No tag issues</div><div class="empty-desc">Detected inconsistencies will appear here.</div></div>`);
+    return;
+  }
+
+  const rows = flagged.map(([entryId, state]) => {
+    const title = state.entryTitle || entryId;
+    const flagsHtml = (state.flags || []).filter(f => !f.resolved).map((f, i) => `
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:8px 10px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:start">
+        <div>
+          <div style="font-weight:600;font-size:11px;color:#dc2626">⚠ ${esc(f.type)}</div>
+          <div style="font-size:11px;color:#374151;margin-top:2px">${esc(f.description)}</div>
+          ${f.recommendedAction ? `<div style="font-size:11px;color:#6b7280">Recommended: ${esc(f.recommendedAction)}</div>` : ''}
+        </div>
+        <button onclick="resolveFlag('${entryId}',${i});showFlaggedEntries()" style="background:none;border:1px solid #fecaca;border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;color:#dc2626;white-space:nowrap;margin-left:8px">Resolve</button>
+      </div>`).join('');
+    return `<div style="background:var(--surface,white);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px">
+      <div style="font-weight:700;font-size:13px;cursor:pointer;margin-bottom:8px;color:var(--text)" onclick="selectEntry('${entryId}');switchTab('tags')">${esc(title)}</div>
+      ${flagsHtml}
+    </div>`;
+  }).join('');
+
+  setContent(`<div style="padding:20px 24px;max-width:800px">
+    <div style="font-size:18px;font-weight:800;color:var(--text);margin-bottom:4px">Tag Issues</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:20px">${flagged.length} entr${flagged.length === 1 ? 'y' : 'ies'} with unresolved flags</div>
+    ${rows}
+  </div>`);
+}
+
+function importTagSuggestions(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if (typeof imported !== 'object' || Array.isArray(imported)) throw new Error('Expected a JSON object keyed by entry ID');
+      let added = 0, skipped = 0;
+      for (const [entryId, state] of Object.entries(imported)) {
+        if (!state.suggestions || !Array.isArray(state.suggestions)) { skipped++; continue; }
+        // Merge: don't overwrite entries already in pending/approved state
+        const existing = tagStates[entryId];
+        if (existing && (existing.status === 'pending' || existing.status === 'approved')) { skipped++; continue; }
+        tagStates[entryId] = {
+          status: state.suggestions.length ? 'suggested' : 'untagged',
+          pendingTags: existing?.pendingTags || [],
+          suggestions: state.suggestions,
+          history: [...(existing?.history || []), ...(state.history || [])],
+          flags: existing?.flags || [],
+          submittedBy: existing?.submittedBy || null,
+          submittedAt: existing?.submittedAt || null,
+          approvedBy: existing?.approvedBy || null,
+          approvedAt: existing?.approvedAt || null,
+          lastSyncedAt: existing?.lastSyncedAt || null,
+          syncError: existing?.syncError || null,
+          entryTitle: state.entryTitle || existing?.entryTitle || entryId,
+          contentType: state.contentType || existing?.contentType || ''
+        };
+        added++;
+      }
+      saveTagStates();
+      showToast(`✦ Imported suggestions for ${added} entries (${skipped} skipped — already in review or invalid)`);
+      // Refresh current view if on approval queue or tag issues
+      updateTagSidebarCounts();
+    } catch(err) {
+      showToast('Import failed: ' + err.message);
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function exportGovernanceReport() {
+  const rows = [['Entry ID', 'Title', 'Content Type', 'Status', 'Current Tags', 'Pending Tags', 'Submitted By', 'Submitted At', 'Approved By', 'Approved At', 'Last Synced', 'Flag Count', 'History Count']];
+  for (const [entryId, state] of Object.entries(tagStates)) {
+    rows.push([
+      entryId,
+      state.entryTitle || '',
+      state.contentType || '',
+      state.status || '',
+      (state.pendingTags || []).filter(t => t.state === 'accepted').map(t => t.tagName).join(';') || '',
+      (state.pendingTags || []).map(t => t.tagName).join(';') || '',
+      state.submittedBy || '',
+      state.submittedAt || '',
+      state.approvedBy || '',
+      state.approvedAt || '',
+      state.lastSyncedAt || '',
+      ((state.flags || []).filter(f => !f.resolved).length).toString(),
+      ((state.history || []).length).toString()
+    ]);
+  }
+  const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tag-governance-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  showToast('Governance report exported');
 }
 
 init();
